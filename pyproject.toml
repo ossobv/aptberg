@@ -8,7 +8,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "aptberg"
 dynamic = ["version"]
-description = "Apt mirror with moving snapshots, stored in S3"
+description = "Apt mirror in S3 with immutable snapshots and staged channels (cur, acc, prod)"
 readme = "README.rst"
 requires-python = ">=3.10"
 license = "GPL-3.0-or-later"
