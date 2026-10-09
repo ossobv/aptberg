@@ -1,0 +1,341 @@
+#!/usr/bin/env python3
+"""Report how much pool data a third-party apt repo would add
+
+Talks straight to the upstream over HTTP: no aptberg.yaml, no keyring,
+no bucket. It fetches Release/InRelease and the Packages indexes of the
+given suites/components/architectures and sums Size, deduplicated by
+Filename the way one aptberg pool is (two suites naming the same file
+cost it once). It also fetches each component's Sources index and
+sums the files it names the same way, since aptberg mirrors those too
+by default (--no-deb-src to size a mirror without them, matching
+deb_src: false). With --include/--soft-exclude/--hard-exclude it runs
+the same seed-and-closure algorithm as aptberg.filter, so a candidate
+filter can be sized before it goes into aptberg.yaml; a source package
+counts as wanted when its Binary: names a package the closure wants,
+same as aptberg.pool. Without any of those it reports the whole-mirror
+total and the biggest package names, which is exactly what a filter
+would want to target.
+
+Only imports aptberg.deb822 and aptberg.filter, both stdlib-only, so it
+needs no venv and no install -- plain system python3 is enough.
+
+Examples:
+  contrib/debrepo-info https://apt.releases.hashicorp.com \\
+      --suite=jammy --suite=noble
+  contrib/debrepo-info https://apt.releases.hashicorp.com \\
+      --suite=jammy --suite=noble --include=vault
+  contrib/debrepo-info http://repo.zabbix.com/zabbix/7.0/ubuntu \\
+      --suite=noble --hard-exclude='*-dbgsym'
+"""
+import argparse
+import bz2
+import gzip
+import lzma
+import sys
+from collections import defaultdict
+from pathlib import Path
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from aptberg.deb822 import stanzas  # noqa: E402
+from aptberg.filter import (  # noqa: E402
+    FOLLOW, Index, closure, is_glob, matching, relations)
+
+UA = "aptberg-contrib-debrepo-info/0 (+size check, no mirroring)"
+DECOMPRESS = {
+    ".gz": gzip.decompress, ".xz": lzma.decompress,
+    ".bz2": bz2.decompress, "": lambda data: data,
+}
+TOP_DEFAULT = 25
+
+
+def get(url: str) -> bytes | None:
+    "GET url, or None on a 404"
+    try:
+        with urlopen(Request(url, headers={"User-Agent": UA}),
+                     timeout=30) as resp:
+            return resp.read()
+    except HTTPError as exc:
+        if exc.code == 404:
+            return None
+        raise
+
+
+def release_stanza(base: str) -> dict[str, str]:
+    "The parsed Release of one suite, from InRelease or Release"
+    data = get(f"{base}/InRelease")
+    if data is not None:
+        text = _unclearsign(data.decode("utf-8", "replace"))
+    else:
+        data = get(f"{base}/Release")
+        if data is None:
+            raise SystemExit(f"{base}: no InRelease or Release")
+        text = data.decode("utf-8", "replace")
+    try:
+        return next(stanzas(text.splitlines()))
+    except StopIteration:
+        raise SystemExit(f"{base}: empty Release")
+
+
+def _unclearsign(text: str) -> str:
+    "Strip a PGP clearsign wrapper, if the text is wrapped in one"
+    lines = text.splitlines()
+    if not lines or not lines[0].startswith("-----BEGIN PGP SIGNED"):
+        return text
+    start = next(i for i, ln in enumerate(lines) if ln == "") + 1
+    end = next(i for i, ln in enumerate(lines)
+               if ln.startswith("-----BEGIN PGP SIGNATURE"))
+    return "\n".join(lines[start:end])
+
+
+def packages(base: str, component: str, arch: str) -> list[dict[str, str]]:
+    "Every stanza of one component/binary-<arch>/Packages, or []"
+    for ext in (".gz", ".xz", ".bz2", ""):
+        data = get(f"{base}/{component}/binary-{arch}/Packages{ext}")
+        if data is not None:
+            text = DECOMPRESS[ext](data).decode("utf-8", "replace")
+            return list(stanzas(text.splitlines()))
+    return []
+
+
+def sources(base: str, component: str) -> list[dict[str, str]]:
+    "Every stanza of one component/source/Sources, or [] (none published)"
+    for ext in (".gz", ".xz", ".bz2", ""):
+        data = get(f"{base}/{component}/source/Sources{ext}")
+        if data is not None:
+            text = DECOMPRESS[ext](data).decode("utf-8", "replace")
+            return list(stanzas(text.splitlines()))
+    return []
+
+
+def source_files(stanza: dict[str, str]) -> list[tuple[str, int]]:
+    """The (filename, size) of every file a Sources stanza names
+
+    Reads Directory: and Checksums-Sha256:, the same fields aptberg.pool
+    reads; a stanza missing either, or a line that does not parse,
+    contributes nothing, matching aptberg's own tolerance for partial
+    source data.
+    """
+    directory = stanza.get("Directory", "").strip()
+    checksums = stanza.get("Checksums-Sha256", "")
+    if not directory or not checksums:
+        return []
+    out = []
+    for line in checksums.splitlines():
+        parts = line.split()
+        if len(parts) != 3 or not parts[1].isdigit():
+            continue
+        _, size, name = parts
+        out.append((f"{directory}/{name}", int(size)))
+    return out
+
+
+def binary_names(value: str) -> set[str]:
+    "The flat set of binary package names a Sources Binary: field lists"
+    return {name for alts in relations(value) for name in alts}
+
+
+def human(n: int) -> str:
+    "n bytes, in the largest unit that keeps it >= 1"
+    size = float(n)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            return f"{size:.1f} {unit}" if unit != "B" else f"{n} B"
+        size /= 1024
+    return f"{n} B"  # unreachable, keeps flake8 happy about the return
+
+
+def parse_args(argv: list[str] | None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="debrepo-info", description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("url", help="repo base URL, above dists/")
+    parser.add_argument("--suite", action="append", required=True,
+                        dest="suites", metavar="SUITE",
+                        help="repeatable; e.g. jammy, noble, stable")
+    parser.add_argument("--component", action="append", dest="components",
+                        metavar="COMPONENT",
+                        help="repeatable (default: main)")
+    parser.add_argument("--arch", action="append", dest="archs",
+                        metavar="ARCH",
+                        help="repeatable (default: amd64); binary-all is "
+                             "always added, as aptberg does")
+    parser.add_argument("--no-deb-src", action="store_false", dest="deb_src",
+                        help="skip Sources and the files it names "
+                             "(aptberg mirrors them by default too; "
+                             "matches deb_src: false)")
+    parser.add_argument("--include", action="append", dest="include",
+                        metavar="PATTERN",
+                        help="repeatable name or fnmatch glob; seeds a "
+                             "filter simulation (default when any filter "
+                             "option is given: [\"*\"])")
+    parser.add_argument("--soft-exclude", action="append",
+                        dest="soft_exclude", metavar="PATTERN",
+                        help="repeatable; drops an --include glob match, "
+                             "dependencies can still pull it back in")
+    parser.add_argument("--hard-exclude", action="append",
+                        dest="hard_exclude", metavar="PATTERN",
+                        help="repeatable; never counted, breaks "
+                             "dependencies on it on purpose")
+    parser.add_argument("--follow", action="append", dest="follow",
+                        metavar="FIELD",
+                        help="repeatable relation field to close over "
+                             "(default: %s)" % ", ".join(FOLLOW))
+    parser.add_argument("--top", type=int, default=TOP_DEFAULT,
+                        help=f"biggest package names to list "
+                             f"(default: {TOP_DEFAULT})")
+    parser.add_argument("--json", action="store_true")
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    url = args.url.rstrip("/")
+    components = args.components or ["main"]
+    archs = args.archs or ["amd64"]
+    filtering = bool(args.include or args.soft_exclude or args.hard_exclude)
+    include = args.include or (["*"] if filtering else [])
+    follow = tuple(args.follow) if args.follow else FOLLOW
+
+    # Filename -> (Size, Package); a shared _pool/ dedups the same way.
+    pool: dict[str, tuple[int, str]] = {}
+    # Filename -> (Size, Binary: names, source Package); same dedup.
+    src_pool: dict[str, tuple[int, frozenset, str]] = {}
+    idx = Index()
+    suite_report = []
+    src_report = []
+    for suite in args.suites:
+        base = f"{url}/dists/{suite}"
+        release = release_stanza(base)
+        have_components = set(release.get("Components", "").split())
+        have_archs = set(release.get("Architectures", "").split())
+        for component in components:
+            if have_components and component not in have_components:
+                print(f"warning: {suite}: component {component!r} not "
+                      f"in Release ({sorted(have_components)})",
+                      file=sys.stderr)
+            wanted_archs = list(dict.fromkeys([*archs, "all"]))
+            for arch in wanted_archs:
+                if have_archs and arch not in have_archs and arch != "all":
+                    print(f"warning: {suite}: architecture {arch!r} not "
+                          f"in Release ({sorted(have_archs)})",
+                          file=sys.stderr)
+                stanzas_here = packages(base, component, arch)
+                count, added = 0, 0
+                for stanza in stanzas_here:
+                    count += 1
+                    filename = stanza.get("Filename")
+                    size = int(stanza.get("Size", 0))
+                    if filename and filename not in pool:
+                        pool[filename] = (size, stanza["Package"])
+                        idx.add(stanza)
+                        added += 1
+                if count:
+                    suite_report.append(
+                        (suite, component, arch, count, added))
+            if args.deb_src:
+                count, added = 0, 0
+                for stanza in sources(base, component):
+                    count += 1
+                    names = frozenset(binary_names(stanza.get("Binary", "")))
+                    pkg = stanza.get("Package", "")
+                    for filename, size in source_files(stanza):
+                        if filename not in src_pool:
+                            src_pool[filename] = (size, names, pkg)
+                            added += 1
+                if count:
+                    src_report.append((suite, component, count, added))
+
+    for suite, component, arch, count, added in suite_report:
+        print(f"{suite} {component}/binary-{arch}: {count} stanzas, "
+              f"{added} new pool files")
+    for suite, component, count, added in src_report:
+        print(f"{suite} {component}/source: {count} stanzas, "
+              f"{added} new pool files")
+    if args.deb_src and not src_pool:
+        print("no source packages found; this repo may not publish "
+              "deb-src", file=sys.stderr)
+
+    total = sum(size for size, _ in pool.values())
+    src_total = sum(size for size, _, _ in src_pool.values())
+    grand_total = total + src_total
+    by_pkg: dict[str, int] = defaultdict(int)
+    for size, name in pool.values():
+        by_pkg[name] += size
+    top = sorted(by_pkg.items(), key=lambda kv: -kv[1])[:args.top]
+    by_src_pkg: dict[str, int] = defaultdict(int)
+    for size, _, pkg in src_pool.values():
+        by_src_pkg[pkg] += size
+    src_top = sorted(by_src_pkg.items(), key=lambda kv: -kv[1])[:args.top]
+
+    result = {
+        "url": url, "suites": args.suites, "components": components,
+        "archs": archs, "pool_files": len(pool), "total_bytes": total,
+        "source_pool_files": len(src_pool), "source_bytes": src_total,
+        "grand_total_bytes": grand_total,
+        "top": [{"package": n, "bytes": s} for n, s in top],
+        "source_top": [{"package": n, "bytes": s} for n, s in src_top],
+    }
+
+    if filtering:
+        seeds = {p for p in include if not is_glob(p)}
+        names = set(idx.stanzas)
+        matched = matching(names, [p for p in include if is_glob(p)])
+        dropped = matching(matched, args.soft_exclude or ())
+        seeds |= matched - dropped
+        hard = matching(names, args.hard_exclude or ())
+        outcome = closure(idx, seeds, follow, hard)
+        wanted_bytes = sum(
+            size for filename, (size, name) in pool.items()
+            if name in outcome.wanted)
+        wanted_src_bytes = sum(
+            size for filename, (size, bins, _) in src_pool.items()
+            if bins & outcome.wanted)
+        result["filtered_bytes"] = wanted_bytes
+        result["filtered_source_bytes"] = wanted_src_bytes
+        result["filtered_grand_total_bytes"] = wanted_bytes + wanted_src_bytes
+        result["wanted_names"] = len(outcome.wanted)
+        result["missing_hard"] = sorted(outcome.missing_hard())
+        result["broken_hard"] = sorted(outcome.broken_hard())
+
+    if args.json:
+        import json
+        print(json.dumps(result, indent=1))
+        return 0
+
+    print(f"\n{len(pool)} pool files, {human(total)} total "
+          f"({url}, {'+'.join(components)}, {'+'.join(archs)})")
+    if args.deb_src:
+        print(f"{len(src_pool)} source pool files, {human(src_total)} "
+              f"total; {human(grand_total)} combined")
+    print(f"\nbiggest {len(top)} package names:")
+    for name, size in top:
+        print(f"  {human(size):>10}  {name}")
+    if src_top:
+        print(f"\nbiggest {len(src_top)} source package names:")
+        for name, size in src_top:
+            print(f"  {human(size):>10}  {name}")
+
+    if filtering:
+        filtered_total = result["filtered_grand_total_bytes"]
+        saved = grand_total - filtered_total
+        pct = 100 * saved / grand_total if grand_total else 0
+        print(f"\nwith this filter: {result['wanted_names']} names, "
+              f"{human(filtered_total)} "
+              f"(saves {human(saved)}, {pct:.0f}%)")
+        if outcome.missing_hard():
+            print(f"  {len(outcome.missing_hard())} unsatisfied "
+                  f"dependencies (not in this repo's own index -- "
+                  f"probably fine if they come from another upstream)")
+        if outcome.broken_hard():
+            print(f"  {len(outcome.broken_hard())} dependencies broken "
+                  f"by --hard-exclude:")
+            for dep in sorted(outcome.broken_hard())[:20]:
+                print(f"    {dep}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,258 @@
+# aptberg configuration. Copy it to aptberg.yaml wherever suits you (next
+# to the manifests checkout, say); aptberg reads ./aptberg.yaml, or what
+# -c or $APTBERG_CONFIG names.
+# Relative paths resolve against this file's directory, not the working
+# directory. S3 credentials come from the usual AWS environment
+# variables or ~/.aws; they are not configured here.
+
+scratch: /var/tmp/aptberg                   # verified indexes; a few GB
+bucket: aptberg.example.com
+endpoint: https://s3.example.com            # S3 endpoint; omit for AWS
+manifests: /srv/aptberg-manifests           # checkout of the manifests repo
+concurrency: 8                              # parallel pool transfers
+download_rate: 300M                         # download speed rate limit (B/s)
+#contact: ops@example.com  # optional in User-Agent to upstream
+
+# An upstream's name, group, pool and path:
+# - name, its key below: where its snapshots (_snap/<name>/) and its
+#   manifests (<manifests>/<name>/) live, and where it is served:
+#   <name>/ch/<stage> or <name>/ch/<channel>-<stage>.
+# - group: upstreams fetched, cut and promoted together. Naming one (or
+#   the group) in fetch/cut/sync/promote means all of them, and cut
+#   refuses a group whose indexes come from different fetch runs. Their
+#   .debs share one pool, _pool/<group>/.
+# - pool: puts the .debs in _pool/<pool>/ instead of _pool/<group or
+#   name>/. Only for archives that never reuse a name_version_arch for
+#   other bytes; Debian and Ubuntu do, so they must not share one.
+# - path: serve at <path>/ch/... instead of <name>/ch/... (see
+#   debian-old below).
+#
+# These rewrite rules need to be configured on the S3 ingress:
+# - normal repo; rewrite pool files to the outside repo-pool (where
+#   xxx-security lands in _pool/xxx):
+#     ^/([^/_-][^/-]+)(-[^/]*)?/ch/[^/]+/pool(/.*)?$
+#     /<BUCKET>/_pool/\1\3
+# - "flat" repo; rewrite deb files to the outside repo-pool (this time
+#   xxx-noble lands in _pool/xxx-noble):
+#     ^/([^/_-][^/]+)/ch/[^/]+/([^/]*\.deb)$
+#     /<BUCKET>/_pool/\1/\2
+# The first rule takes the served path up to its first dash as the pool.
+# That is right for the upstreams below, but not in general: an
+# upstream whose pool is not that first word (an ungrouped foo-bar, a
+# pool:, a group named otherwise) needs a rule of its own.
+
+upstreams:
+  ubuntu:
+    enabled: yes
+    group: ubuntu   # with ubuntu-security; .debs in _pool/ubuntu/
+    url: http://nl.archive.ubuntu.com/ubuntu
+    origin_pins: &ubuntu-pins [{origin: Ubuntu, label: Ubuntu}]
+    keyring: &ubuntu-keyring _keys/ubuntu.gpg
+    # suites: names each suite's components explicitly, even where
+    # (as here) several suites happen to share the same list.
+    suites:
+      resolute: &ubuntu-components [main, restricted, universe]  # multiverse
+      resolute-backports: *ubuntu-components
+      resolute-updates: *ubuntu-components
+      noble: *ubuntu-components
+      noble-backports: *ubuntu-components
+      noble-updates: *ubuntu-components
+      jammy: *ubuntu-components
+      jammy-backports: *ubuntu-components
+      jammy-updates: *ubuntu-components
+    architectures: &ubuntu-arches [amd64, amd64v2, amd64v3, amd64v4, i386]
+    # deb-src: mirrors each component's Sources index and the files it
+    # names -- restricted to the same filter closure as the Packages
+    # below. On by default; uncomment to turn it off for this upstream.
+    # deb_src: false
+    # Each filter holds a filename or an inline list. Filenames are
+    # relative to this config file. Every (line or list) item is a package
+    # name with optional globbing.
+    # include: names and globs; ["*"] is everything.
+    # soft_exclude: drops glob matches; dependencies can bring them back.
+    # hard_exclude: never mirrored; dependencies on them are broken and
+    # reported. Literal include names beat soft_exclude, not hard.
+    filter: &ubuntu-filter
+      include: ["*"]
+      soft_exclude:
+        # Saves ~975G. The current one is pulled in by Depends.
+        - "linux-*[0-9].[0-9]*.[0-9]*-[0-9]*"
+        # Saves ~9G. The current one is pulled in by Depends.
+        - "linux-source-*"
+        # Saves ~9G. Contains dotnet source-build artifacts, to build dotnet.
+        - "*-source-built-artifacts"
+      hard_exclude:
+        # Nvidia drivers and prebuilt modules; breaks only desktop / GPU
+        # packages. Not "*nvidia*": noble's linux-firmware depends on
+        # linux-firmware-nvidia-graphics.
+        - "nvidia-*"
+        - "libnvidia-*"
+        - "linux-objects-nvidia-*"
+        - "linux-signatures-nvidia-*"
+        - "linux-modules-nvidia-*"
+      follow: [Pre-Depends, Depends, Recommends]
+
+  # Served at ubuntu-security/ch/..., its .debs in _pool/ubuntu/: the
+  # first rewrite rule above maps the one to the other.
+  ubuntu-security:
+    enabled: yes
+    group: ubuntu
+    url: http://security.ubuntu.com/ubuntu
+    origin_pins: *ubuntu-pins
+    keyring: *ubuntu-keyring
+    suites:
+      resolute-security: *ubuntu-components
+      noble-security: *ubuntu-components
+      jammy-security: *ubuntu-components
+    architectures: *ubuntu-arches   # match ubuntu's
+    filter: *ubuntu-filter          # match ubuntu's
+
+  debian:
+    # Debian gets a pool of its own, _pool/debian/: Debian and Ubuntu
+    # republish the same name_version_arch with different bytes often
+    # enough that sharing one is not safe (see docs/FINDINGS.rst).
+    enabled: yes
+    group: debian   # with debian-security and debian-old
+    url: http://deb.debian.org/debian
+    origin_pins: &debian-pins
+      - {origin: Debian, label: Debian}
+      - {origin: Debian Backports, label: Debian Backports}
+    keyring: _keys/debian.gpg
+    suites:
+      trixie: &debian-components [main, contrib, non-free-firmware]
+      trixie-backports: *debian-components
+      trixie-updates: *debian-components
+      bookworm: *debian-components
+      bookworm-backports: *debian-components
+      bookworm-updates: *debian-components
+    architectures: &debian-arches [amd64, i386]
+    filter: &debian-filter
+      include: ["*"]
+      soft_exclude:
+        # Debian's kernel packages are named linux-image-6.12.41+deb13-amd64
+        # (also +deb13-rt-amd64, ...-dbg); the current one for each suite
+        # is pulled back in by the meta package's Depends.
+        - "linux-image-*+deb*"
+        - "linux-headers-*+deb*"
+        - "linux-source-*"
+        # Contains dotnet source-build artifacts, to build dotnet.
+        - "*-source-built-artifacts"
+        # Old-style hand-built debug-symbol packages (ceph-*-dbg and
+        # friends); Ubuntu's ddebs equivalent lives on a separate server
+        # we don't mirror, so Debian's main/non-free carries these
+        # directly, often 1G+ each.
+        - "*-dbg"
+      follow: [Pre-Depends, Depends, Recommends]
+
+  debian-security:
+    enabled: yes
+    group: debian
+    url: http://security.debian.org/debian-security
+    origin_pins: *debian-pins
+    keyring: _keys/debian-security.gpg
+    suites:
+      trixie-security: *debian-components
+      bookworm-security: *debian-components
+    architectures: *debian-arches   # match debian's
+    filter: *debian-filter          # match debian's
+
+  # Debian moved jessie to archive.debian.org once it went EOL. It has a
+  # different signing key and possibly a different fetch/cut schedule.
+  # Its .debs are in the group's _pool/debian/, and it is served at
+  # debian/ch/..., so hosts change nothing when a suite goes EOL.
+  debian-old:
+    enabled: yes
+    group: debian
+    path: debian    # served where debian is
+    url: http://archive.debian.org/debian
+    origin_pins: *debian-pins
+    keyring: _keys/debian-old.gpg
+    suites:
+      jessie: [main]
+    architectures: *debian-arches   # match debian's
+    filter: *debian-filter          # match debian's
+
+  zabbix:
+    enabled: yes
+    url: http://repo.zabbix.com/zabbix/7.0/ubuntu
+    keyring: _keys/zabbix.gpg       # gpg --dearmor of the vendor key
+    origin_pins: [{origin: Zabbix, label: zabbix}]
+    # zabbix_7.0.21.orig.tar.gz sha256:df28b6f6.. is not sha256:a7f82c16..
+    deb_src: false                  # issue with source hash mismatch!
+    suites:
+      resolute: [main]
+      noble: [main]
+      jammy: [main]
+      focal: [main]
+    architectures: [amd64, i386]
+
+  # An upstream has either url: (one tree, pinned by suite name or
+  # codename, like ubuntu above) or channels: (below) -- never both.
+  #
+  # A channel is a named pointer:
+  # - early, general, mature, vintage
+  # Each gets its own channel prefix per stage: ch/early-prod, ch/mature-acc.
+  # A host's sources.list names the channel prefix, never the version.
+  kubernetes:
+    enabled: yes
+    keyring: _keys/k8s.gpg
+    suites:
+      anydist: [main]
+    architectures: [amd64, i386]
+    channels:
+      early:
+        {tree: "1.37", url: "http://ppa.example.com/kubernetes-1.37"}
+      general:
+        {tree: "1.36", url: "http://ppa.example.com/kubernetes-1.36"}
+      mature:
+        {tree: "1.35", url: "http://ppa.example.com/kubernetes-1.35"}
+      vintage:
+        {tree: "1.34", url: "http://ppa.example.com/kubernetes-1.34"}
+
+  etcd:
+    enabled: yes
+    keyring: _keys/k8s@example.com.gpg
+    suites:
+      anydist: [main]
+    architectures: [amd64, i386]
+    channels:
+      early:
+        {tree: "3.5", url: "http://ppa.example.com/etcd-3.5"}
+      general:
+        {tree: "3.5", url: "http://ppa.example.com/etcd-3.5"}
+      mature:
+        {tree: "3.5", url: "http://ppa.example.com/etcd-3.5"}
+      vintage:
+        {tree: "3.5", url: "http://ppa.example.com/etcd-3.5"}
+
+  # A PPA's anydist suite can carry packages its codename suites do
+  # not carry (and vice versa).
+  example:
+    enabled: yes
+    url: http://ppa.example.com/ubuntu
+    keyring: _keys/ppa@example.com.gpg
+    suites:
+      anydist: [nss-dns4only]
+      resolute: [gocollect]
+      noble: [gocollect]
+      jammy: [gocollect]
+      focal: [gocollect]
+    architectures: [amd64, i386]
+
+  # A flat repository: Release, Packages.gz and the .debs all sit at the
+  # url, with no dists/ tree and no components. One upstream per distro,
+  # and the suite is named after the upstream. Served at its own path.
+  # Client sources lines name no component, and "./" as the suite:
+  #   deb http://aptberg.example.com/nvidia-cuda-noble/ch/prod/ ./
+  # The optional codename is used by aptberg for dependency resolution
+  # only. The second rewrite rule above serves its .debs from
+  # _pool/nvidia-cuda-noble/.
+  nvidia-cuda-noble:
+    enabled: yes
+    #pool: nvidia-cuda-noble  # same pool as key by default
+    url: https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64
+    keyring: _keys/nvidia-cuda-noble.gpg
+    origin_pins: [{origin: NVIDIA, label: NVIDIA CUDA}]
+    flat: yes
+    deb_src: no
+    codename: noble  # for aptberg dependency resolution

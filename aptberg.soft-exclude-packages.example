@@ -1,0 +1,32 @@
+# aptberg soft_exclude list: fnmatch globs against Package names.
+#
+# You can reference this file from aptberg.yaml through the
+# "soft_exclude" filter.
+#
+# Drops names an include glob (e.g. "*") matched. Dependencies still
+# win: a soft excluded package that something needs is mirrored anyway.
+# Names listed literally in include are kept even when matched here.
+#
+# Sizes: jammy + noble (+ -updates, -security), main restricted universe,
+# amd64, measured 2026-09-22. include ["*"]: 1389G; with this list: 396G.
+
+# Versioned kernel packages: every ABI ever published in -updates, times
+# every flavour (generic, aws, gcp, azure, oracle, lowlatency, nvidia,
+# ...), plus prebuilt nvidia modules per kernel and driver
+# (linux-objects-nvidia-*, ~700G alone). The unversioned metapackages
+# (linux-generic, linux-image-aws, linux-generic-hwe-22.04, ...) are not
+# matched and pull in the ABI they currently point at, so each snapshot
+# carries the current kernel of every flavour. Saves ~975G.
+linux-*[0-9].[0-9]*.[0-9]*-[0-9]*
+
+# Kernel source tarballs, several hundred MB per ABI. Saves ~9G.
+linux-source-*
+
+# dotnet source-build artifacts, only used to build dotnet itself.
+# Saves ~9G.
+*-source-built-artifacts
+
+# Candidates if more is needed (not enabled):
+#   *-doc     saves ~20G
+#   *-dbg     saves ~12G
+#   texlive-* saves ~3G

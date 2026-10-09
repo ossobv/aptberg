@@ -1,0 +1,88 @@
+[build-system]
+requires = [
+    "setuptools>=77.0",
+    "setuptools-scm>=8.0"
+]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aptberg"
+dynamic = ["version"]
+description = "Apt mirror with moving snapshots, stored in S3"
+readme = "README.rst"
+requires-python = ">=3.10"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [
+  { name = "Walter Doekes", email = "wjdoekes+aptberg@osso.nl" },
+]
+
+dependencies = [
+  "boto3",
+  "httpx",
+  "PyYAML",
+  "tqdm",
+]
+
+[project.optional-dependencies]
+dev = [
+  "flake8",
+  "pytest",
+  "pytest-cov",
+]
+
+[project.scripts]
+aptberg = "aptberg.cli:main"
+
+[tool.coverage.run]
+source = ["aptberg"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+
+[tool.ruff]
+line-length = 79
+
+[tool.ruff.format]
+quote-style = "single"
+indent-style = "space"
+skip-magic-trailing-comma = false
+docstring-code-format = false
+
+[tool.ruff.lint]
+ignore = [
+    # Line length conflicts with ruff formatting and can be ignored.
+    "E501",
+    # SIM103 Return the condition directly.
+    "SIM103",
+    # Use `contextlib.suppress(ImportError)` instead of `try`-`except`-`pass`
+    "SIM105",
+]
+select = [
+    # pycodestyle
+    "E",
+    # Pyflakes
+    "F",
+    # pyupgrade
+    "UP",
+    # flake8-bugbear
+    "B",
+    # flake8-simplify
+    "SIM",
+    # isort
+    "I",
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 8
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools_scm]  # activates setuptools_scm
+#version_file = "aptberg/_version.py"

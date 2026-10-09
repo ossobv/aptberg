@@ -1,0 +1,8 @@
+/.venv/
+/src/aptberg.egg-info/
+/.coverage
+/htmlcov/
+
+__pycache__
+*.pyc
+*.swp
