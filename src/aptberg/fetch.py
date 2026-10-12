@@ -299,7 +299,7 @@ def _check_release(
     # suite, and apt does not ask for what the Release does not list.
     for name in upstream.components[suite]:
         if name not in release.components:
-            log.warning('%s: component %s not in Release', base, name)
+            log.warning('%s: component %r not in Release', base, name)
     absent = [
         a for a in upstream.architectures if a not in release.architectures
     ]
