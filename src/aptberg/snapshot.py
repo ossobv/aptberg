@@ -30,7 +30,7 @@ import gzip
 import hashlib
 import json
 import logging
-from collections.abc import Iterable
+from collections.abc import Callable, Container, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
@@ -39,7 +39,7 @@ from pathlib import Path
 from . import index
 from .deb822 import stanzas
 from .fetch import SIGNATURES, FetchedSuite, file_sha256
-from .manifest import AUTO_STAGES, ID, Manifest, Ref
+from .manifest import CUT_STAGE, ID, Manifest, Ref
 from .pool import PREFIX, Selection, storage_key
 from .store import Store
 
@@ -107,18 +107,21 @@ def cut(
     fs: FetchedSuite,
     selection: Selection,
     store: Store,
-    present: dict[str, int],
+    present: Callable[[], Container[str]],
     today: date | None = None,
     allow_missing: bool = False,
     dry_run: bool = False,
 ) -> CutResult:
     """Cut one fetched suite into _snap/, or find it already there
 
-    present is a listing of _pool/ (key -> size). Every pool file the
-    filter selected for this suite must be in it: a snapshot naming
-    .debs we do not have would 404 once applied. allow_missing records
-    them in snapshot.json instead of refusing (for files upstream lists
-    but no longer serves).
+    present gives the _pool/ keys there are, and is called only if the
+    suite is really cut: listing a pool takes long, and most suites of a
+    run are unchanged. Every pool file the filter selected for this
+    suite must be in it: a snapshot naming .debs we do not have would
+    404 once applied. allow_missing records them in snapshot.json
+    instead of refusing (for files upstream lists but no longer serves).
+    This is the pool check apply relies on: gc keeps what a snapshot
+    names for as long as it exists.
     """
     today = today or datetime.now(timezone.utc).date()
     prefix = base(fs)
@@ -131,10 +134,11 @@ def cut(
     selected = sorted(
         f for f in all_files if storage_key(fs.upstream, f) in selection.items
     )
+    have = present()
     missing = [
         f
         for f in selected
-        if selection.items[storage_key(fs.upstream, f)].key not in present
+        if selection.items[storage_key(fs.upstream, f)].key not in have
     ]
     result = CutResult(fs, Ref(tree, snap_id), missing=missing)
     if missing and not allow_missing:
@@ -235,17 +239,15 @@ def record(
     root: Path,
     bucket: str,
     channels: Iterable[str] | None = None,
-    stages: Iterable[str] | None = None,
+    stage: str = CUT_STAGE,
 ) -> list[Manifest]:
-    """Point the cur and acc manifests following the cut tree at the new ref
+    """Point the manifests following the cut tree at the new ref
 
-    For an upstream with channels that is every <channel>-{cur,acc} whose
+    For an upstream with channels that is every <channel>-<stage> whose
     channel follows the cut tree (restricted to channels when given);
-    for one without, cur and acc. Both are AUTO_STAGES: cut keeps them
-    current on every run, no promotion involved -- unlike prod, which
-    only moves via promote. stages restricts which of them are touched
-    (e.g. just "cur", so a cron run keeping cur current never writes or
-    applies acc); default is both.
+    for one without, <stage>. A cut records into cur only: acc and prod
+    move through promote, so neither ever gets a snapshot cur did not
+    serve first.
     """
     up = result.suite.upstream
     if up.channels:
@@ -257,17 +259,15 @@ def record(
         ]
     else:
         names = [None]
-    wanted = [s for s in AUTO_STAGES if stages is None or s in stages]
     out = []
     for channel in names:
-        for stage in wanted:
-            manifest = Manifest.load(
-                root, bucket, up.name, up.served, channel, stage
-            )
-            if manifest.suites.get(result.suite.suite) != result.ref:
-                manifest.suites[result.suite.suite] = result.ref
-                manifest.save()
-            out.append(manifest)
+        manifest = Manifest.load(
+            root, bucket, up.name, up.served, channel, stage
+        )
+        if manifest.suites.get(result.suite.suite) != result.ref:
+            manifest.suites[result.suite.suite] = result.ref
+            manifest.save()
+        out.append(manifest)
     return out
 
 

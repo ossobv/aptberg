@@ -1,7 +1,7 @@
 import pytest
 
 from aptberg.manifest import (
-    AUTO_STAGES,
+    CUT_STAGE,
     STAGES,
     Manifest,
     ManifestError,
@@ -11,9 +11,9 @@ from aptberg.manifest import (
 
 
 def test_stages():
-    "cur is a stage like acc and prod; cur and acc are auto-recorded"
+    "cur is a stage like acc and prod, and the one cut records into"
     assert STAGES == ('cur', 'acc', 'prod')
-    assert AUTO_STAGES == ('cur', 'acc')
+    assert CUT_STAGE == 'cur'
     assert prefix_name(None, 'cur') == 'cur'
     assert prefix_name('stable', 'cur') == 'stable-cur'
     with pytest.raises(ManifestError, match='unknown stage'):

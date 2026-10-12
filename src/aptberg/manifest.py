@@ -26,10 +26,10 @@ import yaml
 
 ID = re.compile(r'\d{8}[a-z]')
 STAGES = ('cur', 'acc', 'prod')
-# Stages cut keeps current on every run, no promotion involved: cur for
-# the always-current mirror old-style clients point straight at, acc
-# for the acc -> prod pipeline.
-AUTO_STAGES = ('cur', 'acc')
+# The stage cut keeps current on every run: the always-current mirror.
+# acc and prod only move through promote, each taking what the stage
+# before it serves.
+CUT_STAGE = 'cur'
 
 
 class ManifestError(Exception):

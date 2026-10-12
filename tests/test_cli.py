@@ -36,7 +36,7 @@ def _setup(tmp_path, monkeypatch):
     "A cut noble recorded in ubuntu/acc.yaml, and a config pointing at it"
     w = World(tmp_path)
     w.sync_pool()
-    record(w.cut(w.suite('noble')), tmp_path / 'manifests', 'bkt')
+    record(w.cut(w.suite('noble')), tmp_path / 'manifests', 'bkt', stage='acc')
     config = tmp_path / 'aptberg.yaml'
     config.write_text(CONFIG.format(keyring=signer().keyring))
     monkeypatch.setattr(cli, '_store', lambda cfg: w.store)
@@ -70,8 +70,30 @@ def test_apply_and_promote(tmp_path, monkeypatch, capsys, caplog):
     )
 
 
+def test_promote_cur_to_acc(tmp_path, monkeypatch, capsys):
+    "--stage=cur cuts acc from what cur serves, without listing _pool/"
+    w, config = _setup(tmp_path, monkeypatch)
+    (tmp_path / 'manifests' / 'ubuntu' / 'acc.yaml').unlink()
+    record(w.cut(w.suite('noble')), tmp_path / 'manifests', 'bkt')
+    assert cli.main(['-c', config, 'apply', 'ubuntu/cur']) == 0
+    capsys.readouterr()
+
+    w.store.listed.clear()
+    argv = ['-c', config, 'promote', '--stage=cur', '--apply', 'ubuntu']
+    assert cli.main(argv) == 0
+    out = capsys.readouterr().out
+    assert 'noble: (none) -> 20260922a (cur serves it)' in out
+    assert 'ubuntu/ch/acc/: applied' in out
+    assert not any(POOL_PREFIX in c for c in w.store.listed)
+    acc = tmp_path / 'manifests' / 'ubuntu' / 'acc.yaml'
+    assert 'noble: 20260922a' in acc.read_text()
+
+    with pytest.raises(SystemExit):
+        cli.main(['-c', config, 'promote', '--stage=prod', 'ubuntu'])
+
+
 def test_cut_apply(tmp_path, monkeypatch, capsys):
-    "cut --apply writes and applies cur and acc right away, for cron"
+    "cut --apply writes and applies cur right away, for cron; never acc"
     w = World(tmp_path)
     w.sync_pool()
     config = tmp_path / 'aptberg.yaml'
@@ -80,18 +102,17 @@ def test_cut_apply(tmp_path, monkeypatch, capsys):
 
     assert cli.main(['-c', str(config), 'cut', '--apply']) == 0
     out = capsys.readouterr().out
-    assert 'ubuntu/ch/acc/: applied' in out
     assert 'ubuntu/ch/cur/: applied' in out
-    assert 'ubuntu/ch/acc/dists/noble/InRelease' in w.store.objects
     assert 'ubuntu/ch/cur/dists/noble/InRelease' in w.store.objects
-    assert (
-        w.store.objects['ubuntu/ch/cur/dists/noble/InRelease']
-        == (w.store.objects['ubuntu/ch/acc/dists/noble/InRelease'])
-    )
+    assert not any(k.startswith('ubuntu/ch/acc') for k in w.store.objects)
+    assert not (tmp_path / 'manifests' / 'ubuntu' / 'acc.yaml').exists()
 
+    w.store.listed.clear()
     assert cli.main(['-c', str(config), 'cut', '--apply']) == 0
     out = capsys.readouterr().out
-    assert out.count('up to date') == 2
+    assert out.count('up to date') == 1
+    # Nothing changed, so nothing was cut: no pool listed.
+    assert not any(POOL_PREFIX in c for c in w.store.listed)
 
 
 def test_cut_apply_lists_pool_once(tmp_path, monkeypatch, capsys):
@@ -119,7 +140,6 @@ def test_sync_apply_lists_pool_once(tmp_path, monkeypatch, capsys):
 
     assert cli.main(['-c', str(config), 'sync', '--apply']) == 0
     out = capsys.readouterr().out
-    assert 'ubuntu/ch/acc/: applied' in out
     assert 'ubuntu/ch/cur/: applied' in out
     pool_lists = [c for c in w.store.listed if c.endswith(POOL_PREFIX)]
     assert pool_lists == [f'etags:{POOL_PREFIX}']
@@ -140,8 +160,8 @@ def test_sync_dry_run_does_not_pretend_pool_is_uploaded(
     assert w.store.objects == {}
 
 
-def test_cut_stage_cur_leaves_acc_untouched(tmp_path, monkeypatch, capsys):
-    "--stage=cur writes and applies only cur; acc is never touched"
+def test_cut_stage_is_only_cur(tmp_path, monkeypatch, capsys):
+    "--stage=cur still works, for old cron lines; acc points to promote"
     w = World(tmp_path)
     w.sync_pool()
     config = tmp_path / 'aptberg.yaml'
@@ -158,12 +178,14 @@ def test_cut_stage_cur_leaves_acc_untouched(tmp_path, monkeypatch, capsys):
     assert not any(k.startswith('ubuntu/ch/acc') for k in w.store.objects)
     assert not (tmp_path / 'manifests' / 'ubuntu' / 'acc.yaml').exists()
 
-    with pytest.raises(SystemExit):
-        cli.main(['-c', str(config), 'cut', '--stage', 'bogus'])
+    for stage in ('acc', 'bogus'):
+        with pytest.raises(SystemExit):
+            cli.main(['-c', str(config), 'cut', '--stage', stage])
+        assert 'promote --stage=cur' in capsys.readouterr().err
 
 
 def test_cut_without_apply_does_not_serve(tmp_path, monkeypatch, capsys):
-    "plain cut writes cur and acc manifests but leaves prefixes unserved"
+    "plain cut writes the cur manifest but leaves the prefix unserved"
     w = World(tmp_path)
     w.sync_pool()
     config = tmp_path / 'aptberg.yaml'
@@ -171,18 +193,14 @@ def test_cut_without_apply_does_not_serve(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli, '_store', lambda cfg: w.store)
 
     assert cli.main(['-c', str(config), 'cut']) == 0
-    for stage in ('cur', 'acc'):
-        manifest = tmp_path / 'manifests' / 'ubuntu' / f'{stage}.yaml'
-        assert 'noble: 20' in manifest.read_text()
-        assert not any(
-            k.startswith(f'ubuntu/ch/{stage}') for k in w.store.objects
-        )
+    manifest = tmp_path / 'manifests' / 'ubuntu' / 'cur.yaml'
+    assert 'noble: 20' in manifest.read_text()
+    assert not any(k.startswith('ubuntu/ch/') for k in w.store.objects)
+    assert not (tmp_path / 'manifests' / 'ubuntu' / 'acc.yaml').exists()
 
 
-def test_apply_lists_the_pool_once_for_several_manifests(
-    tmp_path, monkeypatch
-):
-    "_pool/ is shared and whole-bucket-sized; N manifests list it once"
+def test_apply_does_not_list_the_pool(tmp_path, monkeypatch):
+    "_pool/ is whole-bucket-sized, and apply has no need to list it"
     w, config = _setup(tmp_path, monkeypatch)
     calls = []
     real_list_sizes = type(w.store).list_sizes
@@ -193,7 +211,7 @@ def test_apply_lists_the_pool_once_for_several_manifests(
 
     monkeypatch.setattr(type(w.store), 'list_sizes', counting)
     assert cli.main(['-c', config, 'apply', 'ubuntu/acc', 'ubuntu/acc']) == 0
-    assert calls.count(POOL_PREFIX) == 1
+    assert calls.count(POOL_PREFIX) == 0
 
 
 @pytest.fixture
@@ -481,14 +499,22 @@ def test_promote_everything(tmp_path, monkeypatch, capsys, caplog):
     assert cli.main(['-c', str(config), 'cut']) == 0
     assert (
         cli.main(
-            ['-c', str(config), 'apply', 'ubuntu/acc', 'kubernetes/stable-acc']
+            ['-c', str(config), 'apply', 'ubuntu/cur', 'kubernetes/stable-cur']
         )
         == 0
     )
-    capsys.readouterr()
     manifests = tmp_path / 'manifests'
 
-    # verystable and experimental were never applied: refused, alone
+    # verystable and experimental cur were never applied: refused, alone
+    argv = ['-c', str(config), 'promote', '--stage=cur', '--apply']
+    assert cli.main(argv) == 1
+    assert 'kubernetes verystable: ' in caplog.text
+    assert (manifests / 'kubernetes' / 'stable-acc.yaml').exists()
+    assert not (manifests / 'kubernetes' / 'verystable-acc.yaml').exists()
+    capsys.readouterr()
+    caplog.clear()
+
+    # acc -> prod: the same, one stage on
     assert cli.main(['-c', str(config), 'promote']) == 1
     assert 'kubernetes verystable: ' in caplog.text
     assert 'kubernetes experimental: ' in caplog.text

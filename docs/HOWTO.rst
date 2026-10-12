@@ -29,14 +29,14 @@ answer "what did prod serve last Tuesday at 03:00?" and get those exact
 indexes back, together with the ``.deb`` files they name.
 
 **Tested updates.** Acceptance hosts follow ``acc``, production hosts
-follow ``prod``, and ``prod`` only ever receives a snapshot that ``acc``
-has served. A production host never sees a package that an acceptance
-host has not been offered first, for at least as long as the schedule
-between cut and promote.
+follow ``prod``. ``acc`` only ever receives a snapshot that ``cur`` has
+served, and ``prod`` only one that ``acc`` has served. A production
+host never sees a package that an acceptance host has not been offered
+first, for at least as long as the schedule between the promotions.
 
 All three come from one copy of every file. ``cur`` already holds the
-``.deb`` files, so cutting a new ``acc`` costs little more than copying
-index files.
+snapshots and their ``.deb`` files, so cutting a new ``acc`` is copying
+index files: it fetches nothing and does not list the pool.
 
 Upstream ``Release`` and ``Packages`` files are served byte for byte,
 signatures included. Clients keep verifying against the upstream's own
@@ -122,8 +122,8 @@ Glossary
 
 **cut**
     Freeze what is in scratch into new snapshots, and write their refs
-    into the ``cur`` and ``acc`` manifests. A suite that has not moved
-    keeps its snapshot. A cut serves nothing by itself.
+    into the ``cur`` manifests. A suite that has not moved keeps its
+    snapshot. A cut serves nothing by itself.
 
 **apply**
     Make a channel prefix serve what its manifest names: copy the
@@ -134,8 +134,9 @@ Glossary
     fetch, then cut, in one run.
 
 **promote**
-    Copy refs from the ``acc`` manifests into the ``prod`` manifests,
-    but only those ``acc`` actually serves.
+    Copy refs one stage on, but only those the source prefix actually
+    serves: from ``acc`` to ``prod`` (the default), or from ``cur`` to
+    ``acc`` with ``--stage=cur`` -- which is how a new ``acc`` is cut.
 
 **retire**
     Delete snapshots nothing names or served recently.
@@ -156,7 +157,11 @@ How the commands relate::
                           cut ---------> _snap/ snapshot
                            |
                            v
-                  cur.yaml, acc.yaml --apply--> ch/cur, ch/acc
+                        cur.yaml ------apply--> ch/cur
+                           |
+                        promote --stage=cur (only what ch/cur serves)
+                           v
+                        acc.yaml ------apply--> ch/acc
                            |
                         promote (only what ch/acc serves)
                            v
@@ -208,8 +213,8 @@ outside this guide.
 
     aptberg fetch --no-pool          # indexes and selection; no bucket
     aptberg fetch --dry-run          # also lists _pool/: tests credentials
-    aptberg sync --apply --stage=cur # uploads the pool: hours, the first time
-    aptberg cut --apply --stage=acc  # acc gets the same snapshots
+    aptberg sync --apply             # uploads the pool: hours, the first time
+    aptberg promote --stage=cur --apply  # acc gets the same snapshots
     aptberg promote --apply          # and prod
     aptberg status
     aptberg verify --url=http://aptberg.example.com
@@ -239,39 +244,43 @@ Continuous: cur
 
 ::
 
-    aptberg -q sync --apply --stage=cur
+    aptberg -q sync --apply
 
 fetches every upstream, uploads the new ``.deb`` files, cuts every
-suite that moved, writes the ``cur`` manifests and applies them.
-``--stage=cur`` keeps it away from ``acc``: this job never changes what
-acceptance hosts see. Run it as often as upstream changes matter to
-you, every hour or two say; ``flock -n`` skips a run while the
-previous one is still going::
+suite that moved, writes the ``cur`` manifests and applies them. It
+never changes what acceptance hosts see: only promote touches ``acc``.
+Run it as often as upstream changes matter to you, every hour or two
+say; ``flock -n`` skips a run while the previous one is still going::
 
-    15 */2 * * *  aptberg  flock -n /run/lock/aptberg aptberg -q sync --apply --stage=cur
+    15 */2 * * *  aptberg  flock -n /run/lock/aptberg aptberg -q sync --apply
 
-Weekly: promote, then cut acc
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+(``--stage=cur``, which older versions needed here to keep cut away
+from ``acc``, is still accepted and changes nothing.)
+
+Weekly: promote to prod, then cut acc
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ::
 
     aptberg -q promote --apply
-    aptberg -q cut --apply --stage=acc
+    aptberg -q promote --stage=cur --apply
 
 ``promote`` moves what ``acc`` has served all week to ``prod``, and
-applies ``prod``. It promotes only what the ``acc`` prefix actually
-serves, so a cut that never reached ``acc`` cannot reach ``prod``. A
-group that cannot be promoted is reported and skipped; the others are
-still promoted.
+applies ``prod``. ``promote --stage=cur`` then gives ``acc`` the
+snapshots ``cur`` serves now, and applies ``acc``. Each takes only what
+its source prefix actually serves, so a snapshot that never reached
+``cur`` cannot reach ``acc``, nor one that never reached ``acc``
+``prod``. A group that cannot be promoted is reported and skipped; the
+others are still promoted.
 
-``cut --stage=acc`` then gives ``acc`` the newest snapshots, from the
-indexes the last sync left in scratch, and applies them. It cuts
-nothing new for a suite ``cur`` already has: the suite keeps its
-snapshot id, and ``acc`` gets the very snapshot ``cur`` serves.
+Neither fetches, cuts or lists the pool: the snapshots exist already,
+and the cut that made them checked their ``.deb`` files. Both take
+seconds, however big the mirror.
 
-Promote first: the snapshot reaching ``prod`` then has had a full week
-on ``acc``. The other order is safe (promote never takes what ``acc``
-does not serve) but gives the new ``acc`` no soak time at all.
+Promote to ``prod`` first: the snapshot reaching ``prod`` then has had
+a full week on ``acc``. The other order is safe (promote never takes
+what ``acc`` does not serve) but gives the new ``acc`` no soak time at
+all.
 
 Both write manifests; commit them afterwards. A script for both::
 
@@ -279,7 +288,7 @@ Both write manifests; commit them afterwards. A script for both::
     # /usr/local/sbin/aptberg-weekly
     rc=0
     aptberg -q promote --apply || rc=1
-    aptberg -q cut --apply --stage=acc || rc=1
+    aptberg -q promote --stage=cur --apply || rc=1
     cd /srv/aptberg-manifests &&
         git add -A && { git diff --cached --quiet ||
         git commit -qm 'weekly: promote to prod, cut acc'; }
@@ -314,7 +323,7 @@ Applying by hand
 The jobs above apply as they go. Without ``--apply``, cut and promote
 only write manifests, and you decide when a prefix changes::
 
-    aptberg cut ubuntu --stage=acc              # writes ubuntu*/acc.yaml
+    aptberg promote --stage=cur ubuntu  # writes ubuntu*/acc.yaml
     aptberg diff ubuntu noble-updates 20261002a 20261009a
     aptberg apply ubuntu/acc ubuntu-security/acc --dry-run
     aptberg apply ubuntu/acc ubuntu-security/acc
@@ -322,9 +331,11 @@ only write manifests, and you decide when a prefix changes::
 ``apply`` takes ``UPSTREAM/PREFIX`` (``ubuntu/acc``,
 ``kubernetes/stable-prod``) or a manifest file. ``--dry-run`` prints the
 plan: how many files each phase copies. Before planning, it verifies
-every snapshot's signature again and refuses a manifest whose ``.deb``
-files are not all in ``_pool/``. A prefix serves the old snapshot until
-the last phase, which writes the ``Release`` files suite by suite.
+every snapshot's signature again. It does not list the pool: the cut
+refused a snapshot whose ``.deb`` files were not all in ``_pool/``, and
+gc keeps them while the snapshot exists. ``aptberg verify`` checks that
+independently. A prefix serves the old snapshot until the last phase,
+which writes the ``Release`` files suite by suite.
 
 Promote can be narrowed the same way, and checked first::
 
@@ -339,12 +350,12 @@ the manifest at it, apply, and commit::
     $EDITOR /srv/aptberg-manifests/ubuntu/prod.yaml
     aptberg apply ubuntu/prod
 
-Or let promote do the editing; it accepts any ref ``acc`` has served::
+Or let promote do the editing; it accepts any ref the source stage has
+served (``acc`` for ``prod``, ``cur`` with ``--stage=cur``)::
 
     aptberg promote ubuntu --suite=noble-updates --ref=20261002a --apply
 
-A rolled-back ``prod`` stays put until the next promote; a rolled-back
-``acc`` until the next cut, which points it at the newest snapshot again.
+A rolled-back ``prod`` or ``acc`` stays put until its next promote.
 
 **What is served, and since when**::
 
@@ -353,7 +364,7 @@ A rolled-back ``prod`` stays put until the next promote; a rolled-back
 
 ``status`` shows per prefix and suite the ref the manifest names, the
 ref served, and since when. ``pending`` (the manifest is ahead of the
-prefix) and ``behind acc`` are normal between jobs.
+prefix), ``behind cur`` and ``behind acc`` are normal between jobs.
 
 
 Clients

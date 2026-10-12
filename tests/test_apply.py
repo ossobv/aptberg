@@ -32,7 +32,7 @@ LOCK = '_lock/ubuntu/ch/acc'
 def _acc(w: World, **cut_kw) -> Manifest:
     "Cut noble, record it in ubuntu/acc.yaml, return that manifest"
     result = w.cut(w.suite('noble'), **cut_kw)
-    manifests = record(result, w.tmp_path / 'manifests', 'bkt')
+    manifests = record(result, w.tmp_path / 'manifests', 'bkt', stage='acc')
     return next(m for m in manifests if m.path.stem == 'acc')
 
 
@@ -56,7 +56,7 @@ def test_first_apply(tmp_path):
     manifest = _acc(w)
     plan = build(manifest, UBUNTU, w.store)
     assert [len(plan.by_phase(p)) for p in PHASES] == [4, 4, 3]
-    assert plan.pool_checked == 2
+    assert plan.pool_accepted_missing == []
     w.store.puts.clear()
     assert run(plan, w.store) == 11
     served = _served(w)
@@ -113,10 +113,12 @@ def test_byhash_top_level_entry_no_doubled_slash(tmp_path):
     store = FakeStore()
     selection = select([fs])
     sync(selection, store, http, tmp_path / 'tmp', progress=False)
-    result = cut(fs, selection, store, store.list_sizes(PREFIX), today=DAY)
+    result = cut(
+        fs, selection, store, lambda: store.list_sizes(PREFIX), today=DAY
+    )
     manifest = next(
         m
-        for m in record(result, tmp_path / 'manifests', 'bkt')
+        for m in record(result, tmp_path / 'manifests', 'bkt', stage='acc')
         if m.path.stem == 'acc'
     )
     plan = build(manifest, up, store)
@@ -241,28 +243,33 @@ def test_stale_signature_deleted(tmp_path):
     assert 'dists/noble/InRelease' not in _served(w)
 
 
-def test_pool_must_be_complete(tmp_path):
-    "A snapshot whose .debs are not all in _pool/ is refused"
+def test_accepted_missing_looked_up_again(tmp_path):
+    "Files a snapshot was cut without count until they turn up in _pool/"
     w = World(tmp_path)
     manifest = _acc(w, allow_missing=True)
     plan = build(manifest, UBUNTU, w.store)
     assert len(plan.pool_accepted_missing) == 2
-    marker = '_snap/ubuntu/noble/20260922a/snapshot.json'
-    data = json.loads(w.store.objects[marker][0])
-    data['missing'] = []
-    w.store.objects[marker] = (json.dumps(data).encode(), '')
-    with pytest.raises(PlanError, match='not in _pool/'):
-        build(manifest, UBUNTU, w.store)
+    w.sync_pool()
+    assert build(manifest, UBUNTU, w.store).pool_accepted_missing == []
+
+
+def test_pool_not_listed(tmp_path):
+    "The cut checked the pool and gc keeps it: planning lists no _pool/"
+    w = _world(tmp_path)
+    manifest = _acc(w)
+    w.store.listed.clear()
+    build(manifest, UBUNTU, w.store)
+    assert not any('_pool/' in c for c in w.store.listed)
 
 
 def test_summary(tmp_path):
-    "One line for the pool check and one per phase"
+    "One line for the missing pool files and one per phase"
     w = World(tmp_path)
     plan = build(_acc(w, allow_missing=True), UBUNTU, w.store)
     lines = plan.summary()
     assert lines[:2] == [
         f'{ACC}: noble 20260922a',
-        '  pool     0 files present, 2 missing (accepted at cut)',
+        '  pool     2 files missing (accepted at cut)',
     ]
     # Signatures vary in size; the counts do not.
     assert [line.split(',')[0] for line in lines[2:]] == [
@@ -354,7 +361,7 @@ def test_channel_prefix(tmp_path):
     "A channel upstream's prefix serves the tree its ref names"
     w = _world(tmp_path)
     result = w.cut(w.suite('anydist', '1.31'))
-    manifests = record(result, tmp_path / 'manifests', 'bkt')
+    manifests = record(result, tmp_path / 'manifests', 'bkt', stage='acc')
     stable = next(m for m in manifests if m.path.stem == 'stable-acc')
     run(build(stable, K8S, w.store), w.store)
     served = _served(w, 'kubernetes/ch/stable-acc/')

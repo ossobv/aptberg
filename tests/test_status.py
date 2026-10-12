@@ -39,12 +39,7 @@ def test_ok(tmp_path):
     "Applied acc: named and served agree, with a since and upstream date"
     w = group_world(tmp_path)
     got = _cells(w)
-    assert set(got) == {
-        ('acc', 'noble'),
-        ('acc', 'noble-updates'),
-        ('cur', 'noble'),
-        ('cur', 'noble-updates'),
-    }
+    assert set(got) == {('acc', 'noble'), ('acc', 'noble-updates')}
     cell = got['acc', 'noble']
     assert (cell.manifest, cell.served, cell.states) == (A, A, [])
     assert cell.since is not None
@@ -65,14 +60,27 @@ def test_behind_acc(tmp_path):
     "prod serving an older ref than acc is information, not a problem"
     w = group_world(tmp_path)
     promotion = prepare(tmp_path / 'manifests', 'bkt', UP, None, None, w.store)
-    promotion.prod.save()
-    run(build(promotion.prod, UP, w.store), w.store)
+    promotion.target.save()
+    run(build(promotion.target, UP, w.store), w.store)
     move_noble(w)
     run(build(_acc(w), UP, w.store), w.store)
     got = _cells(w)
     assert got['prod', 'noble'].states == ['behind acc']
     assert got['prod', 'noble-updates'].states == []
     assert got['acc', 'noble'].states == []
+
+
+def test_behind_cur(tmp_path):
+    "acc serving an older ref than cur is information, as prod behind acc"
+    w = group_world(tmp_path)
+    move_noble(w, stage='cur')
+    cur = Manifest.load(
+        w.tmp_path / 'manifests', 'bkt', 'ubuntu', 'ubuntu', None, 'cur'
+    )
+    run(build(cur, UP, w.store), w.store)
+    got = _cells(w)
+    assert got['acc', 'noble'].states == ['behind cur']
+    assert got['cur', 'noble'].states == []
 
 
 def test_drift_and_unrecorded(tmp_path):

@@ -1,13 +1,17 @@
-"""Promote: acc -> prod, per channel prefix; with --apply, apply prod
+"""Promote: cur -> acc, or acc -> prod, per channel prefix
 
-prod only ever receives a snapshot that acc serves or has served. The
-acc manifest is not proof of that: cut writes it before anyone applies
-acc. So by default every promoted suite is checked against what the acc
-prefix actually serves (its Release files carry the snapshot's sha256),
-and a suite acc does not serve yet refuses its unit (below). With an
-explicit ref (one suite), acc's _history/ must show it served that ref
-at some point: promoting the well-soaked snapshot acc has since moved
-past.
+Each stage takes only what the stage before it serves or has served:
+acc what cur served (cutting acc), prod what acc served (promoting to
+prod). Nothing is fetched, cut or listed: the snapshots exist already,
+so a promotion is two manifests and the target prefix's dists/.
+
+The source manifest is not proof of what the source serves: cut writes
+cur before anyone applies it. So by default every promoted suite is
+checked against what the source prefix actually serves (its Release
+files carry the snapshot's sha256), and a suite the source does not
+serve yet refuses its unit (below). With an explicit ref (one suite),
+the source's _history/ must show it served that ref at some point:
+promoting the well-soaked snapshot acc has since moved past.
 
 Promotion is per channel prefix and optionally per suite: noble and
 jammy are separate decisions with separate soaks. A group (ubuntu and
@@ -34,6 +38,11 @@ from .release import family
 from .snapshot import MARKER, snapshot_root
 from .store import Store
 
+# (source, target): each stage takes what the one before it served,
+# so prod never gets a snapshot acc did not serve first.
+STEPS = (('cur', 'acc'), ('acc', 'prod'))
+DEFAULT_STEP = ('acc', 'prod')
+
 
 class PromoteError(Exception):
     "The promotion is not allowed"
@@ -41,20 +50,20 @@ class PromoteError(Exception):
 
 @dataclass
 class Promotion:
-    "The prod manifest as it will be, and what changes in it"
+    "The target manifest as it will be, and what changes in it"
 
-    acc: Manifest
-    prod: Manifest
-    # suite -> (ref prod had, or None; ref it gets)
+    source: Manifest
+    target: Manifest
+    # suite -> (ref the target had, or None; ref it gets)
     changes: dict[str, tuple[Ref | None, Ref]] = field(default_factory=dict)
-    # suite -> why acc counts as having held it
+    # suite -> why the source counts as having held it
     evidence: dict[str, str] = field(default_factory=dict)
 
     def lines(self) -> list[str]:
         "Human-readable changes"
         if not self.changes:
-            return [f'{self.prod.path}: nothing to promote']
-        return [f'{self.prod.path}:'] + [
+            return [f'{self.target.path}: nothing to promote']
+        return [f'{self.target.path}:'] + [
             f'  {suite}: {old or "(none)"} -> {new} ({self.evidence[suite]})'
             for suite, (old, new) in sorted(self.changes.items())
         ]
@@ -111,13 +120,15 @@ def units(
     return out
 
 
-def acc_suites(root: Path, bucket: str, unit: Unit) -> set[str]:
-    "Every suite the acc manifests of a unit name"
+def source_suites(
+    root: Path, bucket: str, unit: Unit, source: str = 'acc'
+) -> set[str]:
+    "Every suite the source manifests of a unit name"
     return {
         suite
         for upstream in unit.upstreams
         for suite in _manifest(
-            root, bucket, upstream, unit.channel, 'acc'
+            root, bucket, upstream, unit.channel, source
         ).suites
     }
 
@@ -130,45 +141,49 @@ def prepare(
     suites: list[str] | None,
     store: Store,
     ref: Ref | None = None,
+    stages: tuple[str, str] = DEFAULT_STEP,
 ) -> Promotion:
     """Work out a promotion without writing anything
 
-    suites defaults to every suite of the acc manifest. ref promotes that
-    snapshot instead of acc's current one, for exactly one suite.
+    stages is the (source, target) step. suites defaults to every suite
+    of the source manifest. ref promotes that snapshot instead of the
+    source's current one, for exactly one suite.
     """
     if ref is not None and (not suites or len(suites) != 1):
         raise PromoteError('a ref promotes exactly one --suite')
     _check_channel(upstream, channel)
-    acc = _manifest(root, bucket, upstream, channel, 'acc')
-    if not acc.path.exists():
+    name, target_name = stages
+    source = _manifest(root, bucket, upstream, channel, name)
+    if not source.path.exists():
+        how = 'cut for' if name == 'cur' else 'promoted to'
         raise PromoteError(
-            f'{acc.path}: no such manifest; nothing was cut for it'
+            f'{source.path}: no such manifest; nothing was {how} it'
         )
-    prod = _manifest(root, bucket, upstream, channel, 'prod')
-    chosen = suites or sorted(acc.suites)
-    unknown = [s for s in chosen if s not in acc.suites]
+    target = _manifest(root, bucket, upstream, channel, target_name)
+    chosen = suites or sorted(source.suites)
+    unknown = [s for s in chosen if s not in source.suites]
     if unknown:
-        raise PromoteError(f'{acc.path}: no suite {", ".join(unknown)}')
+        raise PromoteError(f'{source.path}: no suite {", ".join(unknown)}')
 
-    out = Promotion(acc, prod)
+    out = Promotion(source, target)
     for suite in chosen:
         if ref is None:
-            new = acc.suites[suite]
-            _check_served(store, acc, upstream, suite, new)
-            why = 'acc serves it'
+            new = source.suites[suite]
+            _check_served(store, source, name, upstream, suite, new)
+            why = f'{name} serves it'
         else:
             new = ref
-            event = served_ever(events(store, acc.key_prefix), suite, new)
+            event = served_ever(events(store, source.key_prefix), suite, new)
             if event is None:
                 raise PromoteError(
-                    f'{acc.prefix} never served {suite} {new} according '
+                    f'{source.prefix} never served {suite} {new} according '
                     f'to its history'
                 )
-            why = f'acc served it from {event.at:%Y-%m-%d %H:%M} UTC'
-        if prod.suites.get(suite) != new:
-            out.changes[suite] = (prod.suites.get(suite), new)
+            why = f'{name} served it from {event.at:%Y-%m-%d %H:%M} UTC'
+        if target.suites.get(suite) != new:
+            out.changes[suite] = (target.suites.get(suite), new)
             out.evidence[suite] = why
-            prod.suites[suite] = new
+            target.suites[suite] = new
     return out
 
 
@@ -180,16 +195,26 @@ def prepare_group(
     suites: list[str] | None,
     store: Store,
     ref: Ref | None = None,
+    stages: tuple[str, str] = DEFAULT_STEP,
 ) -> list[Promotion]:
     """prepare() for every upstream of a group, or nothing at all
 
-    Without suites every member promotes all its acc suites. With
+    Without suites every member promotes all its source suites. With
     suites, each member promotes those it has; a member with none of
     them is left out, and a suite no member has is an error.
     """
     if len(upstreams) == 1:
         return [
-            prepare(root, bucket, upstreams[0], channel, suites, store, ref)
+            prepare(
+                root,
+                bucket,
+                upstreams[0],
+                channel,
+                suites,
+                store,
+                ref,
+                stages,
+            )
         ]
     if ref is not None and (not suites or len(suites) != 1):
         raise PromoteError('a ref promotes exactly one --suite')
@@ -200,17 +225,20 @@ def prepare_group(
     for upstream in upstreams:
         mine = suites
         if suites:
-            acc = _manifest(root, bucket, upstream, channel, 'acc')
-            mine = [s for s in suites if s in acc.suites]
+            source = _manifest(root, bucket, upstream, channel, stages[0])
+            mine = [s for s in suites if s in source.suites]
             if not mine:
                 continue
             claimed.update(mine)
-        out.append(prepare(root, bucket, upstream, channel, mine, store, ref))
+        out.append(
+            prepare(root, bucket, upstream, channel, mine, store, ref, stages)
+        )
     unclaimed = [s for s in (suites or ()) if s not in claimed]
     if unclaimed:
         raise PromoteError(
-            f'no acc manifest of {", ".join(u.name for u in upstreams)} '
-            f'has suite {", ".join(unclaimed)}'
+            f'no {stages[0]} manifest of '
+            f'{", ".join(u.name for u in upstreams)} has suite '
+            f'{", ".join(unclaimed)}'
         )
     return out
 
@@ -232,6 +260,7 @@ def prepare_units(
     suites: list[str] | None = None,
     codenames: list[str] | None = None,
     ref: Ref | None = None,
+    stages: tuple[str, str] = DEFAULT_STEP,
 ) -> Prepared:
     """prepare_group() for every unit; one refused does not stop the rest
 
@@ -243,7 +272,9 @@ def prepare_units(
     claimed: set[str] = set()
     for unit in units:
         try:
-            mine = _unit_suites(root, bucket, unit, store, suites, codenames)
+            mine = _unit_suites(
+                root, bucket, unit, store, suites, codenames, stages[0]
+            )
             if mine == []:
                 continue
             claimed.update(mine or ())
@@ -256,6 +287,7 @@ def prepare_units(
                     mine,
                     store,
                     ref,
+                    stages,
                 )
             )
         except PromoteError as exc:
@@ -273,11 +305,12 @@ def _unit_suites(
     store: Store,
     suites: list[str] | None,
     codenames: list[str] | None,
+    source: str,
 ) -> list[str] | None:
     "The suites asked for that this unit has; None if none were asked for"
     if not suites and not codenames:
         return None
-    have = acc_suites(root, bucket, unit)
+    have = source_suites(root, bucket, unit, source)
     mine = [s for s in suites or () if s in have]
     if codenames:
         found = codename_suites(
@@ -288,6 +321,7 @@ def _unit_suites(
             codenames,
             store,
             strict=False,
+            source=source,
         )
         mine += [s for s in found if s not in mine]
     return mine
@@ -301,8 +335,9 @@ def codename_suites(
     codenames: list[str],
     store: Store,
     strict: bool = True,
+    source: str = 'acc',
 ) -> list[str]:
-    """The acc suites of the group whose snapshot has one of codenames
+    """The source suites of the group whose snapshot has one of codenames
 
     The codename is the one the snapshot's Release carried, recorded in
     its snapshot.json at cut, not guessed from the suite name: zabbix
@@ -313,8 +348,8 @@ def codename_suites(
         _check_channel(upstream, channel)
     found: dict[str, list[str]] = {c: [] for c in codenames}
     for upstream in upstreams:
-        acc = _manifest(root, bucket, upstream, channel, 'acc')
-        for suite, ref in sorted(acc.suites.items()):
+        manifest = _manifest(root, bucket, upstream, channel, source)
+        for suite, ref in sorted(manifest.suites.items()):
             raw = store.get_bytes(
                 snapshot_root(upstream.name, suite, ref) + MARKER
             )
@@ -324,8 +359,8 @@ def codename_suites(
     unmatched = [c for c, suites in found.items() if not suites]
     if unmatched and strict:
         raise PromoteError(
-            f'no acc suite of {", ".join(u.name for u in upstreams)} has '
-            f'codename {", ".join(unmatched)}'
+            f'no {source} suite of {", ".join(u.name for u in upstreams)} '
+            f'has codename {", ".join(unmatched)}'
         )
     return sorted({s for suites in found.values() for s in suites})
 
@@ -356,20 +391,25 @@ def _check_channel(upstream: Upstream, channel: str | None) -> None:
 
 
 def _check_served(
-    store: Store, acc: Manifest, upstream: Upstream, suite: str, ref: Ref
+    store: Store,
+    source: Manifest,
+    name: str,
+    upstream: Upstream,
+    suite: str,
+    ref: Ref,
 ) -> None:
     root = snapshot_root(upstream.name, suite, ref)
-    served = served_dists(upstream, acc.key_prefix, suite)
+    served = served_dists(upstream, source.key_prefix, suite)
     checked = False
-    for name in SIGNATURES:
-        want = store.sha256(f'{root}dists/{suite}/{name}')
+    for file in SIGNATURES:
+        want = store.sha256(f'{root}dists/{suite}/{file}')
         if want is None:
             continue
-        have = store.sha256(served + name)
+        have = store.sha256(served + file)
         if have != want:
             raise PromoteError(
-                f'{acc.prefix} does not serve {suite} {ref} ({name} '
-                f'differs); apply acc first'
+                f'{source.prefix} does not serve {suite} {ref} ({file} '
+                f'differs); apply {name} first'
             )
         checked = True
     if not checked:

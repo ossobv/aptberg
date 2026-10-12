@@ -7,7 +7,15 @@ import pytest
 from aptberg.config import Upstream
 from aptberg.fetch import fetch_suite
 from aptberg.manifest import Manifest, Ref
-from aptberg.snapshot import CutError, base, next_id, pool_files, record
+from aptberg.pool import PREFIX
+from aptberg.snapshot import (
+    CutError,
+    base,
+    cut,
+    next_id,
+    pool_files,
+    record,
+)
 
 from .helpers import DAY, Archive, World, signer, source_stanza, stanza
 
@@ -171,7 +179,7 @@ def test_dry_run(tmp_path):
 
 
 def test_tree_snapshots_and_manifests(tmp_path):
-    "Channel upstreams cut per tree; every acc following it is updated"
+    "Channel upstreams cut per tree; every cur following it is updated"
     w = World(tmp_path)
     w.sync_pool()
     fs = w.suite('anydist', '1.31')
@@ -180,17 +188,13 @@ def test_tree_snapshots_and_manifests(tmp_path):
     assert result.ref == Ref('1.31', '20260922a')
     root = tmp_path / 'manifests'
     paths = [m.path.name for m in record(result, root, 'bkt')]
-    assert paths == [
-        'experimental-cur.yaml',
-        'experimental-acc.yaml',
-        'stable-cur.yaml',
-        'stable-acc.yaml',
-    ]
+    assert paths == ['experimental-cur.yaml', 'stable-cur.yaml']
     stable = Manifest.load(
-        root, 'bkt', 'kubernetes', 'kubernetes', 'stable', 'acc'
+        root, 'bkt', 'kubernetes', 'kubernetes', 'stable', 'cur'
     )
     assert stable.suites == {'anydist': Ref('1.31', '20260922a')}
-    assert not (root / 'kubernetes' / 'verystable-acc.yaml').exists()
+    assert not (root / 'kubernetes' / 'verystable-cur.yaml').exists()
+    assert not (root / 'kubernetes' / 'stable-acc.yaml').exists()
 
     only = record(
         w.cut(w.suite('anydist', '1.30')), root, 'bkt', channels=['stable']
@@ -199,31 +203,35 @@ def test_tree_snapshots_and_manifests(tmp_path):
 
 
 def test_record_plain_upstream(tmp_path):
-    "No channels: records into cur and acc, keeping other suites"
+    "No channels: records into cur only, keeping its other suites"
     w = World(tmp_path)
     w.sync_pool()
     root = tmp_path / 'manifests'
-    acc = Manifest.load(root, 'bkt', 'ubuntu', 'ubuntu', None, 'acc')
-    acc.suites['jammy'] = Ref(None, '20260715a')
-    acc.save()
-    record(w.cut(w.suite('noble')), root, 'bkt')
-    assert (root / 'ubuntu' / 'acc.yaml').read_text() == (
-        'prefix: s3://bkt/ubuntu/ch/acc\n'
+    cur = Manifest.load(root, 'bkt', 'ubuntu', 'ubuntu', None, 'cur')
+    cur.suites['jammy'] = Ref(None, '20260715a')
+    cur.save()
+    (manifest,) = record(w.cut(w.suite('noble')), root, 'bkt')
+    assert manifest.path.name == 'cur.yaml'
+    assert (root / 'ubuntu' / 'cur.yaml').read_text() == (
+        'prefix: s3://bkt/ubuntu/ch/cur\n'
         'suites:\n'
         '  jammy: 20260715a\n'
         '  noble: 20260922a\n'
     )
-    assert (root / 'ubuntu' / 'cur.yaml').read_text() == (
-        'prefix: s3://bkt/ubuntu/ch/cur\nsuites:\n  noble: 20260922a\n'
-    )
+    assert not (root / 'ubuntu' / 'acc.yaml').exists()
 
 
-def test_record_stages_restricts_which_are_touched(tmp_path):
-    "stages=['cur'] writes only cur.yaml, never touching acc.yaml"
+def test_cut_lists_the_pool_only_to_cut(tmp_path):
+    "An unchanged suite never asks for the pool listing"
     w = World(tmp_path)
     w.sync_pool()
-    root = tmp_path / 'manifests'
-    (manifest,) = record(w.cut(w.suite('noble')), root, 'bkt', stages=['cur'])
-    assert manifest.path.name == 'cur.yaml'
-    assert (root / 'ubuntu' / 'cur.yaml').exists()
-    assert not (root / 'ubuntu' / 'acc.yaml').exists()
+    w.cut(w.suite('noble'))
+    asked = []
+
+    def present():
+        asked.append(1)
+        return w.store.list_sizes(PREFIX)
+
+    fs = w.suite('noble')
+    assert cut(fs, w.selection, w.store, present, today=DAY).reused
+    assert asked == []

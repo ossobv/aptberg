@@ -81,7 +81,7 @@ def test_source_files_checked_by_etag(tmp_path):
     "Sources' Files: MD5s let source files skip the per-object HEAD"
     w = World(tmp_path, sources=[source_stanza('app-src', 'app')])
     w.sync_pool()
-    record(w.cut(w.suite('noble')), tmp_path / 'manifests', 'bkt')
+    record(w.cut(w.suite('noble')), tmp_path / 'manifests', 'bkt', stage='acc')
     acc = Manifest.load(
         tmp_path / 'manifests', 'bkt', 'ubuntu', 'ubuntu', None, 'acc'
     )

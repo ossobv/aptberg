@@ -52,10 +52,11 @@ just has that version in its ``url:``.
 
 **Stages** are ``cur``, ``acc`` and ``prod``, per upstream. ``cur`` follows
 upstream with no gate, for hosts that want a plain mirror. ``acc`` is the
-first gated deployment. ``prod`` only ever receives a snapshot ``acc`` has
-served. ``cut`` keeps ``cur`` and ``acc`` current; ``prod`` moves only
-through ``promote``. The stages need not share a schedule: ``--stage=cur``
-keeps a cron job away from ``acc``.
+first gated deployment. ``cut`` keeps ``cur`` current; ``acc`` and
+``prod`` move only through ``promote``, each taking what the stage before
+it serves: ``acc`` only ever receives a snapshot ``cur`` has served,
+``prod`` only one ``acc`` has served. The stages need not share a
+schedule.
 
 The guarantee is about the index, not about what apt installs from it:
 Ubuntu's phased updates let each host decide from its own machine-id
@@ -181,8 +182,12 @@ Ubuntu and Debian set ``Acquire-By-Hash: yes``, so apt fetches indexes from
 before the next:
 
 1. Verify every snapshot's signature again from ``_snap/``, and its
-   ``snapshot.json`` against the signed ``Release``. Check that every
-   ``.deb`` it selected is in ``_pool/``; nothing is copied there.
+   ``snapshot.json`` against the signed ``Release``. The pool is not
+   listed: a snapshot exists only once its cut found every ``.deb`` it
+   selected in ``_pool/``, and gc keeps them while it exists (see
+   `Retention`_). Only the files a ``--allow-missing`` cut recorded as
+   missing are looked up again. ``aptberg verify`` checks the pool in
+   full.
 2. Copy the new ``by-hash`` objects into the prefix. New keys only; nothing
    is overwritten.
 3. Copy the canonical index paths (``Packages.gz`` and so on). These
@@ -228,19 +233,27 @@ A channel's ref names its tree, because the channel moves to another tree
 on a version bump and a committed manifest must keep meaning what it
 meant.
 
-``cut`` writes fresh refs into the ``cur`` and ``acc`` manifests;
-``promote`` copies refs from ``acc`` to ``prod``. Both apply what they
-wrote only with ``--apply``. Manifests say what *should* be served;
-``_history/`` says what *was*, and ``aptberg status`` shows the two side
-by side. ``git log`` on a ``prod`` manifest answers "when did this move,
+``cut`` writes fresh refs into the ``cur`` manifests; ``promote`` copies
+refs one stage on, ``cur`` to ``acc`` (``--stage=cur``) or ``acc`` to
+``prod``. Both apply what they wrote only with ``--apply``. Manifests say
+what *should* be served; ``_history/`` says what *was*, and ``aptberg
+status`` shows the two side by side. ``git log`` on a ``prod`` manifest answers "when did this move,
 and to what"; ``cur`` changes on every sync and is best left out of git.
 
-**Promote takes only what acc serves.** The ``acc`` manifest is no proof:
-cut writes it before anyone applies it. So promote compares each suite's
-snapshot ``Release`` files with what the ``acc`` prefix serves, and refuses
-a suite where they differ. ``--ref`` promotes an older snapshot instead, if
-``acc``'s history shows it served it. A group is promoted per channel, all
-members or none; different groups are independent.
+**Promote takes only what the source serves.** A manifest is no proof:
+cut writes ``cur``'s before anyone applies it, and anyone can edit one.
+So promote compares each suite's snapshot ``Release`` files with what the
+source prefix serves, and refuses a suite where they differ. ``--ref``
+promotes an older snapshot instead, if the source's history shows it
+served it. A group is promoted per channel, all members or none;
+different groups are independent.
+
+**Promote is cheap.** It cuts nothing: the snapshots exist, and so does
+every ``.deb`` they name (see `The flip`_). So cutting a new ``acc`` from
+``cur`` reads two manifests per prefix, checks the snapshots' signatures
+and copies the index files that differ -- seconds, not the minutes a
+listing of millions of pool keys takes. Cutting ``acc`` from scratch
+instead would also risk giving it a snapshot ``cur`` never served.
 
 
 Fetch and the dependency closure
@@ -303,10 +316,11 @@ none of this is expressed as one.
 Emergency updates
 -----------------
 
-An urgent fix still goes cut -> acc -> prod, with the soak compressed:
-sync ``ubuntu-security``, ``aptberg diff`` the new snapshot, apply
-``ubuntu-security/acc``, test, and promote with
-``--suite=noble-security``. Every other suite stays where it is.
+An urgent fix still goes cur -> acc -> prod, with the soak compressed:
+sync ``ubuntu-security`` (with ``--apply``), ``aptberg diff`` the new
+snapshot, ``promote --stage=cur --suite=noble-security --apply``, test,
+and ``promote --suite=noble-security --apply``. Every other suite stays
+where it is.
 
 Signed upstream indexes cannot be edited, so a single package cannot be
 patched into a frozen snapshot. Publish it in a PPA of your own instead

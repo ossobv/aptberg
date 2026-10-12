@@ -79,7 +79,6 @@ def test_blocked_while_named_or_recently_served(tmp_path):
     w = two_suites(tmp_path)
     assert _blockers(w, _snap(w), _now()) == [
         f'named by {tmp_path / "manifests" / "ubuntu" / "acc.yaml"}',
-        f'named by {tmp_path / "manifests" / "ubuntu" / "cur.yaml"}',
     ]
     w = _moved(tmp_path / 'moved')
     assert _blockers(w, _snap(w), _now()) == [

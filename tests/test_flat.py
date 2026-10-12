@@ -65,10 +65,12 @@ class Flat:
             self.fs,
             selection,
             self.store,
-            self.store.list_sizes(PREFIX),
+            lambda: self.store.list_sizes(PREFIX),
             today=today,
         )
-        self.manifests = record(result, self.tmp_path / 'manifests', 'bkt')
+        self.manifests = record(
+            result, self.tmp_path / 'manifests', 'bkt', stage='acc'
+        )
         self.acc = next(m for m in self.manifests if m.path.stem == 'acc')
         run(build(self.acc, self.upstream, self.store), self.store)
 
@@ -270,8 +272,8 @@ def test_promote_checks_acc_at_the_prefix_root(tmp_path):
         tmp_path / 'manifests', 'bkt', FLAT, None, None, w.store
     )
     assert promotion.changes == {'nvidia': (None, Ref(None, '20260922a'))}
-    promotion.prod.save()
-    run(build(promotion.prod, FLAT, w.store), w.store)
+    promotion.target.save()
+    run(build(promotion.target, FLAT, w.store), w.store)
     for name in ('InRelease', 'Packages.gz'):
         assert (
             w.store.objects['nvidia/ch/prod/' + name]

@@ -59,7 +59,7 @@ def test_extras_served(tmp_path):
     w = World(tmp_path, extra=EXTRA)
     w.sync_pool()
     result = w.cut(w.suite('noble'))
-    record(result, tmp_path / 'manifests', 'bkt')
+    record(result, tmp_path / 'manifests', 'bkt', stage='acc')
     run(build(_acc(w), UBUNTU, w.store), w.store)
     served = {k for k in w.store.objects if k.startswith(ACC)}
     assert ACC + 'dists/noble/main/dep11/Components-amd64.yml.gz' in served

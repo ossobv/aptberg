@@ -40,7 +40,7 @@ from .fetch import (
     FetchError,
     client,
 )
-from .manifest import AUTO_STAGES, Manifest, ManifestError, Ref
+from .manifest import CUT_STAGE, Manifest, ManifestError, Ref
 from .progress import human
 from .release import SignatureError
 from .store import IntegrityError, Store, StoreError
@@ -170,17 +170,16 @@ def _add_cut(sub: 'argparse._SubParsersAction') -> None:
     "aptberg cut"
     cut = sub.add_parser(
         'cut',
-        help='scratch -> _snap/, and point cur and acc at it',
+        help='scratch -> _snap/, and point cur at it',
         description=(
             'Cut the verified indexes in scratch into immutable snapshots '
-            'and write their refs into the cur and acc manifests, which '
-            'every cut keeps current (prod only moves through promote). '
-            'A suite whose Release has not changed since its latest '
+            'and write their refs into the cur manifests, which every cut '
+            'keeps current (acc and prod only move through promote). A '
+            'suite whose Release has not changed since its latest '
             "snapshot keeps that snapshot's id. Refuses a suite whose "
-            'selected pool files are not all in _pool/. With --apply, '
-            'also applies the manifests it wrote the refs into, so cur '
-            'and acc can be run unattended from cron -- or, with --stage=cur, '
-            'cur alone, without ever writing or applying acc.'
+            'selected pool files are not all in _pool/; only the pools of '
+            'suites really cut are listed. With --apply, also applies the '
+            'cur manifests, so cur can be run unattended from cron.'
         ),
     )
     cut.add_argument(
@@ -202,9 +201,7 @@ def _add_sync(sub: 'argparse._SubParsersAction') -> None:
         help='fetch + cut; the cron entry point',
         description=(
             'fetch (indexes and pool), then cut. With --apply, also apply '
-            'the cur and acc manifests the cut wrote to: one unattended '
-            'cron job. Add --stage=cur to a job that must only ever touch '
-            'cur, never acc.'
+            'the cur manifests the cut wrote to: one unattended cron job.'
         ),
     )
     sync.add_argument(
@@ -224,8 +221,9 @@ def _add_apply(sub: 'argparse._SubParsersAction') -> None:
             'Diff each manifest against its channel prefix and copy what '
             'differs from the snapshots, in phases: by-hash, canonical '
             "indexes, then the Release files. Every snapshot's signature "
-            'is verified again first, and every .deb it selected must '
-            'be in _pool/.'
+            'is verified again first. The pool is not listed: a snapshot '
+            'was only cut once its .debs were in _pool/, and gc keeps '
+            'them while it exists (verify checks that independently).'
         ),
     )
     app.add_argument(
@@ -246,18 +244,28 @@ def _add_promote(sub: 'argparse._SubParsersAction') -> None:
     "aptberg promote"
     prom = sub.add_parser(
         'promote',
-        help='acc -> prod',
+        help='cur -> acc, or acc -> prod',
         description=(
             'Copy the snapshot refs of the selected suites (default: all) '
-            'from the acc manifests to the prod manifests. Without '
-            'upstreams, every upstream; without --channel, every channel. '
-            'A group is promoted per channel, whole or not at all; each '
-            'group and channel is refused or promoted on its own. Refuses '
-            'a suite the acc prefix does not actually serve yet. The prod '
-            'plan is built and verified before the manifest is written; '
-            'committing the manifests is up to you. With --apply, also '
-            'applies the prod manifests.'
+            'from the source manifests to the target manifests: acc -> '
+            'prod by default, cur -> acc (cutting acc) with --stage=cur. '
+            'Nothing is fetched or cut and the pool is not listed: the '
+            'snapshots exist already. Without upstreams, every upstream; '
+            'without --channel, every channel. A group is promoted per '
+            'channel, whole or not at all; each group and channel is '
+            'refused or promoted on its own. Refuses a suite the source '
+            'prefix does not actually serve yet. The target plan is built '
+            'and verified before the manifest is written; committing the '
+            'manifests is up to you. With --apply, also applies the '
+            'target manifests.'
         ),
+    )
+    prom.add_argument(
+        '--stage',
+        choices=[source for source, _ in promote.STEPS],
+        default=promote.DEFAULT_STEP[0],
+        help='the stage to promote: cur (to acc) or acc (to prod); '
+        'default: acc',
     )
     prom.add_argument(
         'upstreams', nargs='*', metavar='UPSTREAM', help=UPSTREAMS_HELP
@@ -280,8 +288,9 @@ def _add_promote(sub: 'argparse._SubParsersAction') -> None:
     prom.add_argument(
         '--ref',
         metavar='REF',
-        help='promote this snapshot ([TREE/]ID) instead of what acc serves '
-        "now; acc's history must show it was served; one --suite",
+        help='promote this snapshot ([TREE/]ID) instead of what the source '
+        "serves now; the source's history must show it was served; one "
+        '--suite',
     )
     prom.add_argument(
         '--dry-run',
@@ -289,7 +298,9 @@ def _add_promote(sub: 'argparse._SubParsersAction') -> None:
         help='show the manifest change and the plan only',
     )
     prom.add_argument(
-        '--apply', action='store_true', help='also apply the prod manifests'
+        '--apply',
+        action='store_true',
+        help='also apply the target manifests',
     )
     prom.add_argument(
         '--force',
@@ -455,8 +466,9 @@ def _add_status(sub: 'argparse._SubParsersAction') -> None:
             'history recorded), unrecorded (served, but no history), '
             'incomplete (a partial apply), pending (the manifest names '
             'another ref than is served: normal until the next apply), '
-            'behind acc (prod serves another ref than acc: normal '
-            'between promotions). Exits 1 on the first three.'
+            'behind cur or behind acc (acc serves another ref than cur, '
+            'prod another than acc: normal between promotions). Exits 1 '
+            'on the first three.'
         ),
     )
     st.add_argument(
@@ -611,6 +623,16 @@ def _duration(text: str) -> timedelta:
         raise argparse.ArgumentTypeError(str(exc)) from None
 
 
+def _cut_stage(text: str) -> str:
+    "The deprecated --stage of cut: cur, the only stage cut writes"
+    if text != CUT_STAGE:
+        raise argparse.ArgumentTypeError(
+            f'cut only writes {CUT_STAGE}; move acc with '
+            f'"promote --stage={CUT_STAGE}"'
+        )
+    return text
+
+
 def _fetch_opts(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         '--dry-run',
@@ -661,20 +683,18 @@ def _cut_opts(parser: argparse.ArgumentParser) -> None:
         help='cut even if selected pool files are missing from _pool/; '
         'they are recorded in snapshot.json',
     )
+    # cut used to write acc as well, and --stage=cur kept a cron run
+    # from doing so. It is the only stage cut writes now; the option is
+    # still accepted, so existing cron lines keep working.
     parser.add_argument(
         '--stage',
-        action='append',
-        dest='stages',
-        metavar='STAGE',
-        choices=AUTO_STAGES,
-        help="only this stage's manifest, cur or acc (repeatable; "
-        'default: both); e.g. --stage=cur for a cron run that must '
-        'not write or apply acc',
+        type=_cut_stage,
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         '--apply',
         action='store_true',
-        help='also apply the cur/acc manifests the cut wrote to',
+        help='also apply the cur manifests the cut wrote to',
     )
     parser.add_argument(
         '--force',
@@ -718,15 +738,7 @@ def cmd_apply(args: argparse.Namespace) -> int:
     cfg = _config(args)
     store = _store(cfg)
     manifests = [_manifest(cfg, name) for name in args.manifests]
-    pool_listing = pool.list_sizes(
-        store,
-        [
-            cfg.upstreams[m.upstream]
-            for m in manifests
-            if m.upstream in cfg.upstreams
-        ],
-    )
-    plans = [_plan(cfg, store, m, pool_listing) for m in manifests]
+    plans = [_plan(cfg, store, m) for m in manifests]
     for p in plans:
         print('\n'.join(p.summary()))
         if not args.dry_run:
@@ -739,6 +751,7 @@ def cmd_promote(args: argparse.Namespace) -> int:
     cfg = _config(args)
     if cfg.manifests is None:
         raise config.ConfigError('promote needs manifests: in config')
+    stages = (args.stage, dict(promote.STEPS)[args.stage])
     names = args.upstreams or list(cfg.upstreams)
     units = promote.units([cfg.upstreams[n] for n in names], args.channels)
     store = _store(cfg)
@@ -750,24 +763,18 @@ def cmd_promote(args: argparse.Namespace) -> int:
         args.suites,
         args.codenames,
         Ref.parse(args.ref) if args.ref else None,
+        stages,
     )
     for unit, why in prepared.refused:
         log.error('%s: %s', unit, why)
     if prepared.unclaimed:
         raise promote.PromoteError(
-            f'no acc manifest has suite {", ".join(prepared.unclaimed)}'
+            f'no {stages[0]} manifest has suite '
+            f'{", ".join(prepared.unclaimed)}'
         )
-    pool_listing = pool.list_sizes(
-        store,
-        [
-            cfg.upstreams[p.prod.upstream]
-            for group in prepared.groups
-            for p in group
-        ],
-    )
     status = 1 if prepared.refused else 0
     for group in prepared.groups:
-        status = _promote(cfg, args, store, group, pool_listing) or status
+        status = _promote(cfg, args, store, group) or status
     return status
 
 
@@ -776,30 +783,29 @@ def _promote(
     args: argparse.Namespace,
     store: Store,
     group: list[promote.Promotion],
-    pool_listing: dict[str, int],
 ) -> int:
     """Plan, write and maybe apply one unit's promotions
 
-    Every prod plan of the unit is built (and so verified) before any of
+    Every target plan of the unit is built (and so verified) before any of
     its manifests is touched: a group is promoted whole or not at all.
     """
     plans = []
     try:
         for promotion in group:
             print('\n'.join(promotion.lines()))
-            plans.append(_plan(cfg, store, promotion.prod, pool_listing))
+            plans.append(_plan(cfg, store, promotion.target))
             print('\n'.join(plans[-1].summary()))
     except plan.PlanError as exc:
-        log.error('%s: %s', group[0].prod.path, exc)
+        log.error('%s: %s', group[0].target.path, exc)
         return 1
     if args.dry_run:
         return 0
     for promotion in group:
         if promotion.changes:
-            promotion.prod.save()
+            promotion.target.save()
     if args.apply:
         for promotion, p in zip(group, plans, strict=True):
-            source = promotion.acc.key_prefix.rstrip('/')
+            source = promotion.source.key_prefix.rstrip('/')
             _apply(cfg, args, store, p, f'promote from {source}')
     return 0
 
@@ -1307,7 +1313,7 @@ def _cut(job: Sync, args: argparse.Namespace) -> int:
     "Cut, say what each suite came to, and with --apply apply it"
     status = 0
     touched: dict[Path, Manifest] = {}
-    for cut in job.cut(args.allow_missing, args.dry_run, args.stages):
+    for cut in job.cut(args.allow_missing, args.dry_run):
         if cut.error:
             log.error('%s: %s', cut.name, cut.error)
             status = 1
@@ -1330,11 +1336,7 @@ def _cut(job: Sync, args: argparse.Namespace) -> int:
             print(f'  {manifest.path}')
             touched[manifest.path] = manifest
     if args.apply and touched:
-        manifests = list(touched.values())
-        upstreams = [job.cfg.upstreams[m.upstream] for m in manifests]
-        _apply_touched(
-            job.cfg, args, job.store, manifests, job.present(upstreams)
-        )
+        _apply_touched(job.cfg, args, job.store, list(touched.values()))
     return status
 
 
@@ -1343,15 +1345,10 @@ def _apply_touched(
     args: argparse.Namespace,
     store: Store,
     manifests: list[Manifest],
-    pool_listing: dict[str, int] | None = None,
 ) -> None:
     "Build and apply the plan of every manifest the cut wrote to"
-    if pool_listing is None:
-        pool_listing = pool.list_sizes(
-            store, [cfg.upstreams[m.upstream] for m in manifests]
-        )
     for manifest in manifests:
-        p = _plan(cfg, store, manifest, pool_listing)
+        p = _plan(cfg, store, manifest)
         print('\n'.join(p.summary()))
         _apply(cfg, args, store, p, 'cut')
 
@@ -1360,7 +1357,6 @@ def _plan(
     cfg: config.Config,
     store: Store,
     manifest: Manifest,
-    pool_listing: dict[str, int],
 ) -> plan.Plan:
     "The plan of a manifest, its snapshots verified"
     upstream = cfg.upstreams.get(manifest.upstream)
@@ -1373,9 +1369,7 @@ def _plan(
         '%s: verifying and diffing against the prefix',
         manifest.key_prefix.rstrip('/'),
     )
-    return plan.build(
-        manifest, upstream, store, cfg.concurrency, pool=pool_listing
-    )
+    return plan.build(manifest, upstream, store, cfg.concurrency)
 
 
 def _apply(

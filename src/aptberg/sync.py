@@ -7,22 +7,24 @@ fetch, cut and sync each run part of the same pipeline:
     select    the pool files the filters and their dependency closure
               want (pool.select)
     upload    put what _pool/ lacks there
-    cut       snapshot each suite into _snap/ and point the cur and acc
+    cut       snapshot each suite into _snap/ and point the cur
               manifests at it
 
 Each step builds on what the one before learned. The expensive thing
 they share is the _pool/ listing: millions of keys on a full mirror. A
 Sync lists it at most once and keeps it current as it uploads, so the
-cut (and the apply after it) never list it again.
+cut never lists it again. A cut on its own lists only the pools of the
+suites it really cuts, as late as it can; apply lists none.
 """
 
 import logging
 import os
 import socket
 import time
-from collections.abc import Iterator
+from collections.abc import Container, Iterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from functools import partial
 
 from . import pool, snapshot
 from .config import Config, Upstream
@@ -89,8 +91,9 @@ class Sync:
         # The _pool/ listing (key -> size, ETag) once something listed
         # it; kept current with every upload.
         self.listing: dict[str, tuple[int, str]] | None = None
-        # Without one, what present() listed for the cut (key -> size).
-        self.sizes: dict[str, int] | None = None
+        # Without one, the pools present() listed for the cut.
+        self.sizes: dict[str, int] = {}
+        self.sized: set[str] = set()
 
     def load(self, offline: bool) -> None:
         """Fetch the suites (or reload them from scratch), and select
@@ -220,35 +223,35 @@ class Sync:
             )
         return result
 
-    def present(self, upstreams: list[Upstream]) -> dict[str, int]:
-        """_pool/ key -> size, for (at least) these upstreams
+    def present(self, upstream: Upstream) -> Container[str]:
+        """The _pool/ keys present, for at least this upstream's pool
 
-        From the listing if there is one; else their _pool/ is listed,
-        once: the apply after a cut asks again, for a subset.
+        The upload's listing if there is one: it covers every named
+        upstream. Else the upstream's own pool is listed, once. cut asks
+        only for a suite it really cuts: most suites of a run are
+        unchanged, and listing a big pool takes minutes.
         """
         if self.listing is not None:
-            return {key: size for key, (size, _) in self.listing.items()}
-        if self.sizes is None:
-            self.sizes = pool.list_sizes(self.store, upstreams)
+            return self.listing
+        todo = [p for p in pool.prefixes([upstream]) if p not in self.sized]
+        if todo:
+            self.sizes.update(pool.list_sizes(self.store, [upstream]))
+            self.sized.update(todo)
         return self.sizes
 
     def cut(
         self,
         allow_missing: bool = False,
         dry_run: bool = False,
-        stages: list[str] | None = None,
     ) -> Iterator[Cut]:
-        """Cut every wanted suite, recording each in its manifests
+        """Cut every wanted suite, recording each in its cur manifests
 
         One Cut per suite, as it is done. A suite that is refused (its
         pool files are not all in _pool/, say) does not stop the rest.
         """
         targets = self._targets()
         if self.cfg.manifests is None:
-            log.warning(
-                'no manifests: in config; cur/acc manifests not updated'
-            )
-        present = self.present([fs.upstream for fs in targets])
+            log.warning('no manifests: in config; cur manifests not updated')
         for fs in targets:
             name = f'{fs.upstream.name} {fs.source.tree or ""} {fs.suite}'
             out = Cut(' '.join(name.split()))
@@ -257,7 +260,7 @@ class Sync:
                     fs,
                     self.selection,
                     self.store,
-                    present,
+                    partial(self.present, fs.upstream),
                     allow_missing=allow_missing,
                     dry_run=dry_run,
                 )
@@ -271,7 +274,6 @@ class Sync:
                     self.cfg.manifests,
                     self.cfg.bucket,
                     self.scope.channels or None,
-                    stages,
                 )
             yield out
 

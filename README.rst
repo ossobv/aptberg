@@ -20,14 +20,19 @@ One mirror does three jobs:
 - ``cur`` is a plain mirror, kept current continuously;
 - every index ever served stays available as a snapshot, with a history
   of what was served where and when;
-- ``prod`` only ever receives snapshots that ``acc`` has served, so
-  acceptance hosts always see an update first.
+- ``acc`` only ever receives snapshots that ``cur`` has served, and
+  ``prod`` only ones that ``acc`` has served, so acceptance hosts always
+  see an update first.
 
 Three jobs keep it running::
 
-    aptberg sync --apply --stage=cur    # continuously: fetch, cut, serve cur
-    aptberg promote --apply             # weekly: acc -> prod
-    aptberg cut --apply --stage=acc     # weekly, after promote: cur -> acc
+    aptberg sync --apply                 # continuously: fetch, cut, serve cur
+    aptberg promote --apply              # weekly: acc -> prod
+    aptberg promote --stage=cur --apply  # weekly, after that: cur -> acc
+
+Only ``sync`` fetches, cuts and lists the pool. The two promotions copy
+refs between manifests and apply them: they take seconds, whatever the
+size of the mirror.
 
 `docs/HOWTO.rst <docs/HOWTO.rst>`_ explains why, defines the terms, and
 walks through setup, these jobs, applying by hand, client configuration
@@ -53,11 +58,11 @@ Relative paths in the config resolve against its directory. Then::
     aptberg fetch zabbix        # only zabbix's pool files
     aptberg sync ubuntu         # ubuntu and the rest of its group
     aptberg cut ubuntu --codename=noble  # noble, noble-updates, noble-security
-    aptberg cut                 # scratch -> _snap/, update cur and acc manifests
-    aptberg sync --apply        # fetch + cut + apply cur and acc, for cron
-    aptberg sync --apply --stage=cur   # cur only, for cron; never touches acc
+    aptberg cut                 # scratch -> _snap/, update the cur manifests
+    aptberg sync --apply        # fetch + cut + apply cur, for cron
     aptberg apply ubuntu/cur --dry-run   # the plan for a channel prefix
     aptberg apply ubuntu/acc    # publish what manifests/ubuntu/acc.yaml says
+    aptberg promote --stage=cur --apply  # everything: cur -> acc, then apply
     aptberg promote --apply     # everything: acc -> prod, then apply
     aptberg promote ubuntu --suite=noble-security   # only these suites
     aptberg promote kubernetes --channel=stable     # only this channel

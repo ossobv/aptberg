@@ -510,7 +510,11 @@ class World:
     def cut(self, fs, **kw):
         kw.setdefault('today', DAY)
         return cut(
-            fs, self.selection, self.store, self.store.list_sizes(PREFIX), **kw
+            fs,
+            self.selection,
+            self.store,
+            lambda: self.store.list_sizes(PREFIX),
+            **kw,
         )
 
 
@@ -538,12 +542,14 @@ def two_suites(tmp_path) -> World:
     w.selection = select(w.suites)
     w.sync_pool()
     for suite in ('noble', 'noble-updates'):
-        record(w.cut(w.suite(suite)), tmp_path / 'manifests', 'bkt')
+        record(
+            w.cut(w.suite(suite)), tmp_path / 'manifests', 'bkt', stage='acc'
+        )
     return w
 
 
-def move_noble(w, version='2.0'):
-    "Publish, fetch, sync and cut a new noble; recorded in acc.yaml"
+def move_noble(w, version='2.0', stage='acc'):
+    "Publish, fetch, sync and cut a new noble; recorded in stage's yaml"
     w.archive.add_suite(
         '/ubuntu',
         'noble',
@@ -563,7 +569,9 @@ def move_noble(w, version='2.0'):
     )
     w.selection = select(w.suites)
     w.sync_pool()
-    record(w.cut(w.suite('noble')), w.tmp_path / 'manifests', 'bkt')
+    record(
+        w.cut(w.suite('noble')), w.tmp_path / 'manifests', 'bkt', stage=stage
+    )
 
 
 UPG = replace(UP, group='ubuntu')
@@ -594,7 +602,7 @@ def group_world(tmp_path, apply_security=True) -> World:
     w.suites.append(sec)
     w.selection = select(w.suites)
     w.sync_pool()
-    record(w.cut(sec), tmp_path / 'manifests', 'bkt')
+    record(w.cut(sec), tmp_path / 'manifests', 'bkt', stage='acc')
     for up in (UP, SEC) if apply_security else (UP,):
         acc = Manifest.load(
             tmp_path / 'manifests', 'bkt', up.name, up.served, None, 'acc'

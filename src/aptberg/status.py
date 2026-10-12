@@ -12,6 +12,7 @@ States, worst first:
     incomplete  the latest event for the prefix was a partial apply
     pending     the manifest names another ref than is served: normal
                 right after cut or a manifest edit, until the apply
+    behind cur  an acc serving another ref than its cur, or
     behind acc  a prod serving another ref than its acc: normal between
                 promotions
 
@@ -29,6 +30,7 @@ from .history import Live, events, state_at
 from .layout import dists as served_dists
 from .layout import served_suites
 from .manifest import STAGES, Manifest, Ref
+from .promote import STEPS
 from .snapshot import MARKER, snapshot_root
 from .store import Store
 
@@ -114,7 +116,7 @@ def cells(
         out += _prefix_cells(
             store, upstream, name, manifests.get(name), now, foreign
         )
-    _mark_behind_acc(out)
+    _mark_behind(out)
     return out
 
 
@@ -150,15 +152,17 @@ def _prefix_cells(
     return out
 
 
-def _mark_behind_acc(cells: list[Cell]) -> None:
-    "A prod cell serving another ref than its acc is behind acc"
+def _mark_behind(cells: list[Cell]) -> None:
+    "A cell serving another ref than the stage it is promoted from"
     served = {(c.name, c.suite): c.served for c in cells}
+    source = {target: source for source, target in STEPS}
     for cell in cells:
-        if cell.stage == 'prod':
-            acc = '-'.join(filter(None, (cell.channel, 'acc')))
-            theirs = served.get((acc, cell.suite))
+        if cell.stage in source:
+            stage = source[cell.stage]
+            name = '-'.join(filter(None, (cell.channel, stage)))
+            theirs = served.get((name, cell.suite))
             if theirs is not None and theirs != cell.served:
-                cell.states.append('behind acc')
+                cell.states.append(f'behind {stage}')
 
 
 def _served(

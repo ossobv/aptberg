@@ -1,10 +1,8 @@
 """Plan: what apply must do to make a channel prefix serve a manifest
 
 A plan is a flat list of ops, each in one of three phases, applied in
-order with a barrier in between. Planning itself checks the pool first:
+order with a barrier in between:
 
-    (pool)   every .deb the snapshots selected is in _pool/; nothing is
-             copied, and a plan with a file missing is refused
     byhash   index files to dists/<suite>/<dir>/by-hash/SHA256/<sha>:
              new keys only, nothing overwritten
     index    index files to their canonical paths (overwrites; read
@@ -22,9 +20,19 @@ Before anything is planned, each snapshot's signature is verified again
 from _snap/ against the upstream keyring, and its snapshot.json is
 checked against the signed Release: nothing unverified reaches a served
 prefix.
+
+The pool is not listed. A snapshot exists only once its cut found every
+.deb it selected in _pool/, and gc keeps every file a snapshot in _snap/
+names until that snapshot is retired: the pool cannot have lost them
+since. That makes applying a snapshot -- and promoting it, which is the
+same thing for another prefix -- cost what the snapshot's dists/ cost,
+not a listing of millions of pool keys. The one exception is a snapshot
+cut with --allow-missing: the files its snapshot.json records as
+missing are looked up one by one (backfill may have brought them since)
+and reported. A full check of the pool against the snapshots a prefix
+serves is what verify is for.
 """
 
-import gzip
 import hashlib
 import json
 import logging
@@ -38,8 +46,6 @@ from .fetch import SIGNATURES
 from .layout import dists as served_dists
 from .layout import listing_root
 from .manifest import Manifest, Ref
-from .pool import PREFIX as POOL_PREFIX
-from .pool import list_sizes as list_pool_sizes
 from .pool import storage_key
 from .progress import human
 from .release import Release, SignatureError, verified_release
@@ -77,7 +83,7 @@ class Plan:
     ops: list[Op] = field(default_factory=list)
     # suite -> {"InRelease": sha256, ...} of the snapshot it will serve
     signatures: dict[str, dict[str, str]] = field(default_factory=dict)
-    pool_checked: int = 0
+    # pool files a snapshot was cut without, still not in _pool/
     pool_accepted_missing: list[str] = field(default_factory=list)
 
     def by_phase(self, phase: str) -> list[Op]:
@@ -90,15 +96,11 @@ class Plan:
             f'{self.prefix}: '
             + ', '.join(f'{s} {r}' for s, r in sorted(self.suites.items()))
         ]
-        lines.append(
-            f'  pool     {self.pool_checked} files present'
-            + (
-                f', {len(self.pool_accepted_missing)} missing '
+        if self.pool_accepted_missing:
+            lines.append(
+                f'  pool     {len(self.pool_accepted_missing)} files missing '
                 f'(accepted at cut)'
-                if self.pool_accepted_missing
-                else ''
             )
-        )
         for phase in PHASES:
             ops = self.by_phase(phase)
             copies = [op for op in ops if op.kind == 'copy']
@@ -116,24 +118,16 @@ def build(
     upstream: Upstream,
     store: Store,
     concurrency: int = 8,
-    pool: dict[str, int] | None = None,
 ) -> Plan:
-    """Diff the manifest against its prefix; verify what it points at
-
-    pool: a listing (key -> size) of at least the upstream's _pool/
-    prefix; pass one in when building several plans in a row, as it can
-    be millions of keys. Without, the upstream's own is listed.
-    """
+    "Diff the manifest against its prefix; verify what it points at"
     if manifest.upstream != upstream.name:
         raise PlanError(f'{manifest.path} is not for {upstream.name}')
     prefix = manifest.key_prefix
     plan = Plan(prefix, dict(manifest.suites))
     if not manifest.suites:
         return plan
-    if pool is None:
-        pool = list_pool_sizes(store, [upstream])
     present = store.list_sizes(listing_root([upstream], prefix))
-    builder = _Builder(plan, upstream, store, pool, present)
+    builder = _Builder(plan, upstream, store, present, concurrency)
     for suite, ref in sorted(manifest.suites.items()):
         if (ref.tree is None) != (not upstream.channels):
             raise PlanError(
@@ -142,7 +136,7 @@ def build(
                 f'{"has" if upstream.channels else "has no"} channels'
             )
         builder.add_suite(suite, ref)
-    builder.add_overwrites(concurrency)
+    builder.add_overwrites()
     plan.ops.sort(key=_order)
     return plan
 
@@ -160,14 +154,14 @@ class _Builder:
         plan: Plan,
         upstream: Upstream,
         store: Store,
-        pool: dict[str, int],
         present: dict[str, int],
+        concurrency: int,
     ) -> None:
         self.plan = plan
         self.upstream = upstream
         self.store = store
-        self.pool = pool
         self.present = present
+        self.concurrency = concurrency
         # (phase, dst, src, sha256, size, suite) of objects that overwrite
         self.overwrites: list[tuple[str, str, str, str, int, str]] = []
 
@@ -179,7 +173,9 @@ class _Builder:
             self.store, root, upstream, suite
         )
         plan.signatures[suite] = {n: sha for n, (sha, _) in signatures.items()}
-        _check_pool(self.store, root, marker, self.pool, plan, upstream)
+        plan.pool_accepted_missing += _still_missing(
+            self.store, marker, upstream, self.concurrency
+        )
         src = f'{root}dists/{suite}/'
         dst = served_dists(upstream, plan.prefix, suite)
         for path, sha256, size in marker['entries']:
@@ -210,12 +206,12 @@ class _Builder:
                     Op('release', 'delete', dst + name, suite=suite)
                 )
 
-    def add_overwrites(self, concurrency: int) -> None:
+    def add_overwrites(self) -> None:
         "Copy the overwriting objects whose content differs"
         have = _sha256s(
             self.store,
             [w[1] for w in self.overwrites if w[1] in self.present],
-            concurrency,
+            self.concurrency,
         )
         for phase, dst, src, sha256, size, suite in self.overwrites:
             if have.get(dst) != sha256:
@@ -283,31 +279,14 @@ def verified_snapshot(
     return marker, signatures, release
 
 
-def _check_pool(
-    store: Store,
-    root: str,
-    marker: dict,
-    pool: dict[str, int],
-    plan: Plan,
-    upstream: Upstream,
-) -> None:
-    raw = store.get_bytes(root + 'selected.gz')
-    if raw is None:
-        raise PlanError(f'{root}selected.gz: missing')
-    accepted = set(marker.get('missing', ()))
-    lacking = []
-    for filename in gzip.decompress(raw).decode().splitlines():
-        if storage_key(upstream, filename) in pool:
-            plan.pool_checked += 1
-        elif filename in accepted:
-            plan.pool_accepted_missing.append(filename)
-        else:
-            lacking.append(filename)
-    if lacking:
-        raise PlanError(
-            f'{root}: {len(lacking)} selected pool files are not in '
-            f'{POOL_PREFIX}, e.g. {lacking[0]}; run fetch or backfill'
-        )
+def _still_missing(
+    store: Store, marker: dict, upstream: Upstream, concurrency: int
+) -> list[str]:
+    "The pool files a snapshot was cut without that are still not there"
+    names = marker.get('missing', ())
+    keys = [storage_key(upstream, n) for n in names]
+    have = _sha256s(store, keys, concurrency)
+    return [n for n, k in zip(names, keys, strict=True) if have[k] is None]
 
 
 def _sha256s(

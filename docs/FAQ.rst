@@ -152,9 +152,9 @@ claiming ``Origin: Ubuntu`` would step out of the deny stanza above. Set
 ``fetch``, ``sync`` and a ``cut`` from scratch then refuse a Release whose
 Origin and Label match none of the listed pairs, naming them all. (More
 than one pair is for an upstream whose suites differ, like Debian and its
-backports.) Nothing reaches ``acc``, so nothing reaches ``prod``. If
-upstream really renamed itself, review what changed, then update
-``origin_pins:`` here and the pref files on the hosts together.
+backports.) Nothing new reaches ``cur``, so nothing reaches ``acc`` or
+``prod``. If upstream really renamed itself, review what changed, then
+update ``origin_pins:`` here and the pref files on the hosts together.
 
 Pinning only decides which versions are candidates. It is not a sandbox: a
 package you do allow still runs its maintainer scripts as root. Beyond the

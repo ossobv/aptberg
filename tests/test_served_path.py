@@ -80,18 +80,18 @@ def _world(tmp_path):
     selection = select([main_fs, old_fs])
     sync(selection, store, http, tmp_path / 'tmp', progress=False)
     present = store.list_sizes(PREFIX)
-    main_manifests = record(
-        cut(main_fs, selection, store, present, today=DAY),
+    (acc_main,) = record(
+        cut(main_fs, selection, store, lambda: present, today=DAY),
         tmp_path / 'manifests',
         'bkt',
+        stage='acc',
     )
-    old_manifests = record(
-        cut(old_fs, selection, store, present, today=DAY),
+    (acc_old,) = record(
+        cut(old_fs, selection, store, lambda: present, today=DAY),
         tmp_path / 'manifests',
         'bkt',
+        stage='acc',
     )
-    acc_main = next(m for m in main_manifests if m.path.stem == 'acc')
-    acc_old = next(m for m in old_manifests if m.path.stem == 'acc')
     run(build(acc_main, main, store), store)
     run(build(acc_old, old, store), store)
     cfg = Config(
