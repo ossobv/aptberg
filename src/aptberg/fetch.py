@@ -265,7 +265,7 @@ def fetch_suite(
     release = Release.parse(payload)
     _check_release(upstream, release, base, suite)
     entries = _fetch_entries(
-        http, base, release, index.wanted(release, upstream, suite), dest
+        http, base, release, _wanted(release, upstream, suite, base), dest
     )
     _settle(dest, {entry.path for entry in entries}, run)
     log.info('%s: %d index files, %s', base, len(entries), release.date)
@@ -297,8 +297,11 @@ def _check_release(
     # mistake. Architectures are one list for all suites of an upstream
     # (focal has no amd64v3): a missing one is just a fact about this
     # suite, and apt does not ask for what the Release does not list.
+    # Debian's security archive lists its components as updates/main
+    # and so on, but its files and apt's sources lists use plain main;
+    # apt accepts either, and so do we.
     for name in upstream.components[suite]:
-        if name not in release.components:
+        if not {name, f'updates/{name}'} & set(release.components):
             log.warning('%s: component %r not in Release', base, name)
     absent = [
         a for a in upstream.architectures if a not in release.architectures
@@ -307,6 +310,33 @@ def _check_release(
         log.info(
             '%s: no such architecture in Release: %s', base, ', '.join(absent)
         )
+
+
+def _wanted(
+    release: Release, upstream: Upstream, suite: str, base: str
+) -> list[Entry]:
+    """The entries to mirror of a suite; refused without a Packages index
+
+    A suite cut without one serves a signed Release whose indexes are
+    not there: every apt update against it fails. That happens when the
+    configured components select nothing from the Release (a typo, or
+    updates/main where the Release lists main/...).
+    """
+    entries = index.wanted(release, upstream, suite)
+    if upstream.flat:
+        return entries
+    heads = index.packages_indexes(entries)
+    if not heads:
+        raise FetchError(
+            f'{base}: components {upstream.components[suite]!r} select '
+            f'no Packages index from the Release'
+        )
+    for name in upstream.components[suite]:
+        if not any(h.startswith(f'{name}/') for h in heads):
+            log.warning(
+                '%s: component %r selects no Packages index', base, name
+            )
+    return entries
 
 
 def _fetch_entries(
@@ -410,7 +440,7 @@ def load_suite(
     payload = _scratch_payload(dest, upstream.keyring)
     release = Release.parse(payload)
     check_origin_pins(upstream, release, str(dest))
-    entries = index.wanted(release, upstream, suite)
+    entries = _wanted(release, upstream, suite, str(dest))
     served = []
     for entry in entries:
         if not matches(dest / entry.path, entry):

@@ -110,6 +110,31 @@ def test_fetch_suite_missing_index_is_an_error(tmp_path):
         _fetch(archive, tmp_path)
 
 
+def test_fetch_suite_updates_components(tmp_path, caplog):
+    "Debian security's Components: updates/main is plain main to us"
+    archive = _archive(components='updates/main')
+    fs = _fetch(archive, tmp_path)
+    assert 'main/binary-amd64/Packages.xz' in {e.path for e in fs.entries}
+    assert 'not in Release' not in caplog.text
+
+
+def test_fetch_suite_no_packages_selected(tmp_path):
+    "Components selecting no Packages index refuse the suite"
+    archive = _archive(components='updates/main')
+    up = _upstream(components={'noble': ('updates/main',)})
+    with pytest.raises(FetchError, match='select no Packages index'):
+        _fetch(archive, tmp_path, up)
+
+
+def test_fetch_suite_component_selects_nothing(tmp_path, caplog):
+    "One component selecting nothing is only warned about"
+    archive = _archive()
+    up = _upstream(components={'noble': ('main', 'contrib')})
+    fs = _fetch(archive, tmp_path, up)
+    assert fs.entries
+    assert "component 'contrib' selects no Packages index" in caplog.text
+
+
 def test_fetch_suite_contents(tmp_path):
     "Contents-<arch> is always pulled in"
     archive = _archive()

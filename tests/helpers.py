@@ -171,6 +171,7 @@ class Archive:
         headers: dict[str, str] | None = None,
         extra: dict[str, bytes] | None = None,
         sources: list[tuple[str, dict[str, bytes]]] | None = None,
+        components: str = 'main',
     ):
         """Publish a suite under root; packages maps component/arch dirs
 
@@ -179,6 +180,7 @@ class Archive:
         headers: more Release fields, {"Origin": "Zabbix"}.
         sources: [source_stanza(...), ...], published as main/source/
         Sources; omit for an upstream that does not carry source at all.
+        components: the Release's Components field.
         """
         signer_ = signer_ or signer()
         dists = f'{root}/dists/{suite}'
@@ -238,7 +240,7 @@ class Archive:
                     f'Codename: {codename or suite}',
                     'Date: Tue, 22 Sep 2026 08:00:00 UTC',
                     'Architectures: amd64 arm64',
-                    'Components: main',
+                    f'Components: {components}',
                     'Acquire-By-Hash: yes'
                     if by_hash
                     else 'Acquire-By-Hash: no',
