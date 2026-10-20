@@ -185,3 +185,69 @@ More
 - Test a change before rolling it out: ``apt-cache policy zabbix-agent
   libc6`` should show Zabbix winning the first and the second unchanged,
   and ``apt-get -s install zabbix-agent2`` shows what it would pull in.
+
+
+Debian hosts on acc or prod say the Release file is expired. What now?
+-----------------------------------------------------------------------
+
+``apt update`` on a Debian host on ``acc`` or ``prod`` fails with::
+
+    E: Release file for http://aptberg.example.com/debian-security/ch/prod/dists/trixie-security/InRelease
+       is expired (invalid since 1d 4h 25min 13s). Updates for this
+       repository will not be applied.
+
+Debian's ``-security``, ``-updates`` and ``-backports`` suites carry a
+``Valid-Until:`` of 7 days after their ``Date:``. Upstream refreshes it
+every day; a frozen snapshot does not, so once a snapshot is more than 7
+days old, apt refuses it. ``cur`` is never affected. The release suite
+itself (``trixie``) has no ``Valid-Until``, and neither do Ubuntu's suites.
+
+aptberg serves upstream's signed ``Release`` as is and cannot change the
+field. The fix is on the hosts, for those three suites only. Pick one per
+suite; the other suites stay on their channel either way.
+
+Raise the limit: ``valid-until-min``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+apt can lengthen (never shorten) the validity per source, counted from the
+Release's ``Date:``. 15 days::
+
+    deb [valid-until-min=1296000] http://aptberg.example.com/debian/ch/prod trixie-updates main contrib non-free-firmware
+    deb [valid-until-min=1296000] http://aptberg.example.com/debian/ch/prod trixie-backports main contrib non-free-firmware
+    deb [valid-until-min=1296000] http://aptberg.example.com/debian-security/ch/prod trixie-security main contrib non-free-firmware
+
+or ``Valid-Until-Min: 1296000`` in a deb822 ``.sources`` file. To set it
+for every source at once (harmless for those without ``Valid-Until``)::
+
+    # /etc/apt/apt.conf.d/99-dep-cooldown-raise-valid
+    Acquire::Min-ValidTime "1296000";
+
+- Choose at least the oldest a ``prod`` snapshot gets: the time from a cut
+  to its promotion, plus the time until the next promotion, plus slack.
+  Too short, and the error comes back between promotions.
+- The suites keep their cooldown: ``prod`` still gets only what ``acc``
+  had.
+- The price is a longer replay window. A stale but validly signed Release
+  is accepted for 15 days instead of 7, so a man in the middle can hold a
+  host back on old security fixes that long. ``check-valid-until=no``
+  works too, but removes the limit altogether; prefer ``valid-until-min``.
+
+Take those suites from ``cur``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Point only the expiring suites at ``cur`` and leave the rest on ``prod``::
+
+    deb http://aptberg.example.com/debian/ch/prod trixie main contrib non-free-firmware
+    deb http://aptberg.example.com/debian/ch/cur trixie-updates main contrib non-free-firmware
+    deb http://aptberg.example.com/debian/ch/cur trixie-backports main contrib non-free-firmware
+    deb http://aptberg.example.com/debian-security/ch/cur trixie-security main contrib non-free-firmware
+
+- No apt option and no replay trade-off: ``cur`` is as fresh as upstream.
+- No cooldown for those suites: an ``acc`` and a ``prod`` host get the same
+  updates at the same time, untested. For ``-security`` that is often
+  what you want anyway; for ``-updates`` and ``-backports`` it gives up
+  most of what the channels are for on Debian.
+
+The two mix: ``-security`` from ``cur``, ``-updates`` and ``-backports``
+on ``prod`` with ``valid-until-min``. Do not move the whole host to
+``cur`` for this; only these suites expire.

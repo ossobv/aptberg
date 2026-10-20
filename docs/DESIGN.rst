@@ -334,9 +334,14 @@ What upstreams must provide
 - **Acquire-By-Hash**, for the flip to have no window. Most do; check
   third-party repositories.
 - **No Valid-Until**, or snapshots expire. Ubuntu's suites have none
-  (checked 2026-09-20). Debian's security suite has 7 days: serving a frozen
-  one longer needs ``Check-Valid-Until: no`` on the clients, which turns off
-  apt's protection against replayed indexes.
+  (checked 2026-09-20). Debian's ``-security``, ``-updates`` and
+  ``-backports`` suites are valid for 7 days after their ``Date:``; the
+  release suite itself has no limit. The field is inside the signature, so
+  aptberg cannot extend it: an ``acc`` or ``prod`` snapshot older than that
+  fails ``apt update`` with "Release file ... is expired". Clients either
+  raise the limit per source with ``valid-until-min`` (a longer replay
+  window, still bounded) or take those suites from ``cur`` (no cooldown
+  for them). See the FAQ.
 - **InRelease, or Release with Release.gpg.** aptberg handles both.
 
 
