@@ -1,3 +1,4 @@
+import json
 import re
 
 import httpx
@@ -220,3 +221,13 @@ def test_cli(tmp_path, monkeypatch, capsys, caplog):
     assert 'ERROR _pool/_shared/main/a/app/app_1.0_amd64.deb: missing' in (
         capsys.readouterr().out
     )
+
+
+def test_snapshot_without_packages(tmp_path):
+    "A served snapshot that holds no Packages index is an error"
+    w = group_world(tmp_path)
+    marker = '_snap/ubuntu/noble/20260922a/snapshot.json'
+    data = json.loads(w.store.objects[marker][0])
+    data['entries'] = [e for e in data['entries'] if '/Packages' not in e[0]]
+    w.store.objects[marker] = (json.dumps(data).encode(), '')
+    assert _noble(w).errors == ['serves no Packages index']

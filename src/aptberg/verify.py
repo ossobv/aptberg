@@ -6,7 +6,8 @@ From the bucket (verify_prefix), per suite the prefix serves:
   and the forms agree
 - every index we mirror is at its canonical path and, if the Release
   advertises by-hash, at its by-hash path, with the size and MD5 the
-  signed Release names (deep: downloaded and SHA256-hashed instead)
+  signed Release names (deep: downloaded and SHA256-hashed instead),
+  and among them at least one Packages index (flat repositories aside)
 - the served Release is the one _history/ recorded
 - every pool file the served snapshot selected is in _pool/ with the
   size and MD5 its Packages entry (or its Sources stanza's Files:)
@@ -123,6 +124,8 @@ def verify_prefix(
             release,
             served.served.ref if served else None,
         )
+        if not upstream.flat and not index.packages_indexes(entries):
+            report.errors.append('serves no Packages index')
         check = _Check(store, upstream, dists, report, deep, concurrency)
         check.indexes(release, entries, listing)
         if served is None:

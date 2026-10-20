@@ -384,3 +384,16 @@ def test_lock(tmp_path):
     assert 'dists/noble/InRelease' not in _served(w)
     run(plan, w.store, force=True)
     assert LOCK not in w.store.objects
+
+
+def test_snapshot_without_packages_refused(tmp_path):
+    "A snapshot whose components selected no Packages index is not served"
+    w = _world(tmp_path)
+    manifest = _acc(w)
+    marker = '_snap/ubuntu/noble/20260922a/snapshot.json'
+    data = json.loads(w.store.objects[marker][0])
+    data['entries'] = [e for e in data['entries'] if '/Packages' not in e[0]]
+    assert data['entries']
+    w.store.objects[marker] = (json.dumps(data).encode(), '')
+    with pytest.raises(PlanError, match='holds no Packages index'):
+        build(manifest, UBUNTU, w.store)

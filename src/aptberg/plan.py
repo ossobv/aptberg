@@ -19,7 +19,7 @@ appear in the plan.
 Before anything is planned, each snapshot's signature is verified again
 from _snap/ against the upstream keyring, and its snapshot.json is
 checked against the signed Release: nothing unverified reaches a served
-prefix.
+prefix. A snapshot without a Packages index is refused too.
 
 The pool is not listed. A snapshot exists only once its cut found every
 .deb it selected in _pool/, and gc keeps every file a snapshot in _snap/
@@ -48,7 +48,7 @@ from .layout import listing_root
 from .manifest import Manifest, Ref
 from .pool import storage_key
 from .progress import human
-from .release import Release, SignatureError, verified_release
+from .release import Entry, Release, SignatureError, verified_release
 from .snapshot import MARKER, snapshot_root
 from .store import Store
 
@@ -172,6 +172,17 @@ class _Builder:
         marker, signatures, _ = verified_snapshot(
             self.store, root, upstream, suite
         )
+        if not upstream.flat and not index.packages_indexes(
+            Entry(path, sha256, size)
+            for path, sha256, size in marker['entries']
+        ):
+            # A Release served over indexes that are not there: every
+            # apt update against it fails. Fetch refuses to make such a
+            # snapshot now, but older ones exist.
+            raise PlanError(
+                f'{root}: holds no Packages index (cut while the '
+                f'components selected nothing?); pick another snapshot'
+            )
         plan.signatures[suite] = {n: sha for n, (sha, _) in signatures.items()}
         plan.pool_accepted_missing += _still_missing(
             self.store, marker, upstream, self.concurrency
