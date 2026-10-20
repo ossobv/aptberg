@@ -249,15 +249,16 @@ def _add_promote(sub: 'argparse._SubParsersAction') -> None:
             'Copy the snapshot refs of the selected suites (default: all) '
             'from the source manifests to the target manifests: acc -> '
             'prod by default, cur -> acc (cutting acc) with --stage=cur. '
-            'Nothing is fetched or cut and the pool is not listed: the '
-            'snapshots exist already. Without upstreams, every upstream; '
-            'without --channel, every channel. A group is promoted per '
-            'channel, whole or not at all; each group and channel is '
-            'refused or promoted on its own. Refuses a suite the source '
-            'prefix does not actually serve yet. The target plan is built '
-            'and verified before the manifest is written; committing the '
-            'manifests is up to you. With --apply, also applies the '
-            'target manifests.'
+            'Without upstreams, every upstream; without --channel, every '
+            'channel. '
+            'A group is promoted per channel, whole or not at all; '
+            'each group and channel is refused or promoted on its own. '
+            'An upstream with neither a source nor a target manifest is new '
+            'and skipped with a warning; the rest of its group goes ahead. '
+            'Refuses a suite that is not actually serve yet. '
+            'The target plan is built and verified before the manifest is '
+            'written; committing the manifests is up to you. '
+            'With --apply, also applies the target manifests.'
         ),
     )
     prom.add_argument(
@@ -765,6 +766,8 @@ def cmd_promote(args: argparse.Namespace) -> int:
         Ref.parse(args.ref) if args.ref else None,
         stages,
     )
+    for unit, why in prepared.skipped:
+        log.warning('%s: %s', unit, why)
     for unit, why in prepared.refused:
         log.error('%s: %s', unit, why)
     if prepared.unclaimed:

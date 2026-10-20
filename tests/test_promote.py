@@ -13,6 +13,7 @@ from aptberg.promote import (
     codename_suites,
     prepare,
     prepare_group,
+    prepare_units,
     units,
 )
 from aptberg.snapshot import record
@@ -190,6 +191,33 @@ def test_group_suites_go_where_they_live(tmp_path):
     assert [sorted(p.changes) for p in both] == [['noble'], ['noble-security']]
     with pytest.raises(PromoteError, match='has suite jammy-security'):
         _group(w, ['noble', 'jammy-security'])
+
+
+def test_group_new_member(tmp_path):
+    "A member with no acc and no prod is new: skipped, the rest goes ahead"
+    w = group_world(tmp_path)
+    manifests = tmp_path / 'manifests'
+    (manifests / 'ubuntu-security' / 'acc.yaml').unlink()
+    prepared = prepare_units(manifests, 'bkt', units([UPG, SEC]), w.store)
+    assert not prepared.refused
+    assert [(str(u), why) for u, why in prepared.skipped] == [
+        ('ubuntu-security', 'new, not promoted to acc yet; skipped')
+    ]
+    ((only,),) = prepared.groups
+    assert only.target.path == manifests / 'ubuntu' / 'prod.yaml'
+
+
+def test_group_member_lost_acc(tmp_path):
+    "A member with a prod but no acc is not new: the whole group is refused"
+    w = group_world(tmp_path)
+    manifests = tmp_path / 'manifests'
+    (manifests / 'ubuntu-security' / 'acc.yaml').unlink()
+    _manifest(w, 'prod', upstream='ubuntu-security').save()
+    prepared = prepare_units(manifests, 'bkt', units([UPG, SEC]), w.store)
+    assert not prepared.skipped and not prepared.groups
+    ((unit, why),) = prepared.refused
+    assert str(unit) == 'ubuntu, ubuntu-security'
+    assert 'nothing was promoted to it' in why
 
 
 def test_group_all_or_nothing(tmp_path):

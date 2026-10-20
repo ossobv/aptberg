@@ -23,6 +23,12 @@ still touches only ubuntu-security.
 Everything promote moves splits into units: one group on one channel
 (Unit). Units are independent of each other: one that is refused does
 not hold back the rest.
+
+A member with neither a source nor a target manifest is new: added to
+the config, but not cut or promoted to the source stage yet. It is
+skipped with a warning, and the rest of its group goes ahead. This way
+the following cur->acc promotion will fix it for the next run.
+A source gone while the target still exists is refused.
 """
 
 import json
@@ -249,6 +255,7 @@ class Prepared:
 
     groups: list[list[Promotion]] = field(default_factory=list)
     refused: list[tuple[Unit, str]] = field(default_factory=list)
+    skipped: list[tuple[Unit, str]] = field(default_factory=list)  # new
     unclaimed: list[str] = field(default_factory=list)  # asked, nowhere
 
 
@@ -266,11 +273,25 @@ def prepare_units(
 
     suites and codenames name suites across every unit: each unit takes
     those it has, which may be none, and then is left out. What no unit
-    has is unclaimed.
+    has is unclaimed. New members (see the module docstring) are
+    skipped, and a unit of only new members with them.
     """
     out = Prepared()
     claimed: set[str] = set()
     for unit in units:
+        new = [
+            u for u in unit.upstreams if _new(root, bucket, u, unit, stages)
+        ]
+        if new:
+            how = 'cut' if stages[0] == 'cur' else f'promoted to {stages[0]}'
+            out.skipped.append(
+                (Unit(new, unit.channel), f'new, not {how} yet; skipped')
+            )
+            unit = Unit(
+                [u for u in unit.upstreams if u not in new], unit.channel
+            )
+            if not unit.upstreams:
+                continue
         try:
             mine = _unit_suites(
                 root, bucket, unit, store, suites, codenames, stages[0]
@@ -375,6 +396,20 @@ def _manifest(
     "The upstream's manifest of this channel and stage"
     return Manifest.load(
         root, bucket, upstream.name, upstream.served, channel, stage
+    )
+
+
+def _new(
+    root: Path,
+    bucket: str,
+    upstream: Upstream,
+    unit: Unit,
+    stages: tuple[str, str],
+) -> bool:
+    "Whether the upstream has neither a source nor a target manifest"
+    return not any(
+        _manifest(root, bucket, upstream, unit.channel, stage).path.exists()
+        for stage in stages
     )
 
 

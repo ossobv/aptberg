@@ -514,10 +514,11 @@ def test_promote_everything(tmp_path, monkeypatch, capsys, caplog):
     capsys.readouterr()
     caplog.clear()
 
-    # acc -> prod: the same, one stage on
-    assert cli.main(['-c', str(config), 'promote']) == 1
-    assert 'kubernetes verystable: ' in caplog.text
-    assert 'kubernetes experimental: ' in caplog.text
+    # acc -> prod: verystable and experimental have no acc and no prod
+    # yet: new, so skipped with a warning, not refused
+    assert cli.main(['-c', str(config), 'promote']) == 0
+    assert 'kubernetes verystable: new, not promoted to acc' in caplog.text
+    assert 'kubernetes experimental: new, not promoted to acc' in caplog.text
     assert 'kubernetes stable: ' not in caplog.text
     assert (manifests / 'ubuntu' / 'prod.yaml').exists()
     assert (manifests / 'kubernetes' / 'stable-prod.yaml').exists()
