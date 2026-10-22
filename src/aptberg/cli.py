@@ -487,19 +487,66 @@ def _add_diff(sub: 'argparse._SubParsersAction') -> None:
     "aptberg diff"
     df = sub.add_parser(
         'diff',
-        help='package-level diff between two snapshots of a suite',
+        help='package-level diff between two stages or snapshots',
         description=(
             'Compare the Packages indexes of two already-cut snapshots '
-            'of the same suite: packages added, removed, or changed '
-            'version, by component/architecture. Indexes are never '
-            'filtered, so this is what a client would see, not just '
-            'what the pool holds.'
+            'of each suite: packages added, removed, or changed '
+            'version, by component/architecture, from OLD to NEW, as '
+            'in git: prod..acc is what the next promotion to prod '
+            'brings, acc..cur what the next cut of acc brings. OLD and '
+            'NEW are each a stage (cur, acc, prod: the snapshot its '
+            'prefix serves now, from the bucket) '
+            'or a snapshot ref ([TREE/]ID, with --suite). '
+            'Indexes are never filtered, so this is what a client would '
+            'see, not just what the pool holds. Without upstreams, '
+            'every upstream; naming one does not add the rest of its '
+            'group. With --files, the pool files NEW names and OLD does '
+            'not instead: one line per file, with the codename, '
+            'component, size, sha256 and the path under the NEW prefix '
+            'to fetch it from. '
+            'Example: diff prod..cur ubuntu-security '
+            "--source='php8*' --files"
         ),
     )
-    df.add_argument('upstream', metavar='UPSTREAM')
-    df.add_argument('suite', metavar='SUITE')
-    df.add_argument('id_a', metavar='REF-A', help='[TREE/]ID')
-    df.add_argument('id_b', metavar='REF-B', help='[TREE/]ID')
+    df.add_argument(
+        'range',
+        metavar='OLD..NEW',
+        help='each a stage or [TREE/]ID: prod..acc, acc..cur',
+    )
+    df.add_argument(
+        'names',
+        nargs='*',
+        metavar='UPSTREAM',
+        help='only these upstreams or groups',
+    )
+    df.add_argument(
+        '--channel',
+        action='append',
+        dest='channels',
+        metavar='CHANNEL',
+        help='only upstreams with channels, only this channel (repeatable)',
+    )
+    df.add_argument(
+        '--suite',
+        action='append',
+        dest='suites',
+        metavar='SUITE',
+        help='only this suite (repeatable)',
+    )
+    _codename_opt(df)
+    df.add_argument(
+        '--source',
+        action='append',
+        dest='sources',
+        metavar='GLOB',
+        help='only packages built from a matching source package, '
+        "e.g. --source='php8*' (repeatable)",
+    )
+    df.add_argument(
+        '--files',
+        action='store_true',
+        help='list the pool files new in B, not the package changes',
+    )
     df.add_argument(
         '--json', action='store_true', help='the same, for a program to read'
     )
@@ -930,39 +977,121 @@ def _history_at(
 def cmd_diff(args: argparse.Namespace) -> int:
     "aptberg diff"
     cfg = _config(args)
-    if args.upstream not in cfg.upstreams:
-        raise config.ConfigError(f'unknown upstream {args.upstream!r}')
+    a, b = diff.sides(args.range)
+    if diff.backwards(a, b):
+        log.warning(
+            '%s lists what %s has over %s; for what is coming, try %s..%s',
+            args.range,
+            b,
+            a,
+            b,
+            a,
+        )
+    names = []
+    for name in args.names or cfg.upstreams:
+        # A group's name means its members; a member means only itself.
+        named = [name] if name in cfg.upstreams else cfg.expand([name])
+        names += [n for n in named if n not in names]
     store = _store(cfg)
-    ref_a, ref_b = Ref.parse(args.id_a), Ref.parse(args.id_b)
-    result = diff.diff_suite(store, args.upstream, args.suite, ref_a, ref_b)
+    pairs = diff.pairs(
+        store,
+        cfg.upstreams,
+        promote.units([cfg.upstreams[n] for n in names], args.channels),
+        a,
+        b,
+        args.suites,
+        args.codenames,
+    )
+    if args.files:
+        return _diff_files(args, store, pairs)
+    results = [
+        (
+            pair,
+            diff.diff_suite(
+                store,
+                pair.upstream.name,
+                pair.suite,
+                pair.a,
+                pair.b,
+                args.sources,
+            ),
+        )
+        for pair in pairs
+    ]
+    results = [(pair, result) for pair, result in results if result]
     if args.json:
         print(
             json.dumps(
-                {
-                    head: {
-                        'added': d.added,
-                        'removed': d.removed,
-                        'changed': {n: list(v) for n, v in d.changed.items()},
+                [
+                    {
+                        'upstream': pair.upstream.name,
+                        'channel': pair.channel,
+                        'suite': pair.suite,
+                        'a': pair.a and str(pair.a),
+                        'b': pair.b and str(pair.b),
+                        'heads': {
+                            head: {
+                                'added': d.added,
+                                'removed': d.removed,
+                                'changed': {
+                                    n: list(v) for n, v in d.changed.items()
+                                },
+                            }
+                            for head, d in result.items()
+                        },
                     }
-                    for head, d in result.items()
-                },
+                    for pair, result in results
+                ],
                 indent=1,
                 sort_keys=True,
             )
         )
         return 0
-    if not result:
-        print(
-            f'{args.suite}: no package differences between {ref_a} and {ref_b}'
-        )
+    if not results:
+        print(f'no package differences in {args.range}')
         return 0
-    for head, d in sorted(result.items()):
-        print(f'{head}:')
-        rows = [(n, None, v) for n, v in d.added.items()]
-        rows += [(n, v, None) for n, v in d.removed.items()]
-        rows += [(n, o, v) for n, (o, v) in d.changed.items()]
-        for name, old, new in sorted(rows, key=lambda r: r[0]):
-            print(f'  {name} {old or "(none)"} -> {new or "(none)"}')
+    for pair, result in results:
+        channel = f' {pair.channel}' if pair.channel else ''
+        print(
+            f'{pair.upstream.name}{channel} {pair.suite}: '
+            f'{pair.a or "(none)"} -> {pair.b or "(none)"}'
+        )
+        for head, d in sorted(result.items()):
+            print(f'  {head}:')
+            rows = [(n, None, v) for n, v in d.added.items()]
+            rows += [(n, v, None) for n, v in d.removed.items()]
+            rows += [(n, o, v) for n, (o, v) in d.changed.items()]
+            for name, old, new in sorted(rows, key=lambda r: r[0]):
+                print(f'    {name} {old or "(none)"} -> {new or "(none)"}')
+    return 0
+
+
+def _diff_files(
+    args: argparse.Namespace, store: Store, pairs: list[diff.Pair]
+) -> int:
+    """aptberg diff --files
+
+    A file several suites of one release name (noble-updates and
+    noble-security often carry the same fix, under ubuntu/ and
+    ubuntu-security/) is listed once, at the first path found: a copy
+    of it goes into that release once.
+    """
+    files = {}
+    for pair in pairs:
+        for f in diff.new_files(store, pair, args.sources):
+            files.setdefault((f.codename, f.component, f.sha256), f)
+    found = sorted(files.values())
+    if args.json:
+        print(json.dumps([f.to_dict() for f in found], indent=1))
+        return 0
+    if not found:
+        print(f'no new pool files in {args.range}')
+        return 0
+    print('# codename component size sha256 path')
+    for f in found:
+        print(
+            f'{f.codename} {f.component or "-"} {f.size} {f.sha256} {f.path}'
+        )
     return 0
 
 

@@ -326,6 +326,12 @@ Signed upstream indexes cannot be edited, so a single package cannot be
 patched into a frozen snapshot. Publish it in a PPA of your own instead
 (the same ``.deb``, or a rebuild with a higher version), mirror that PPA
 like any upstream, and remove it once the regular suite catches up.
+``aptberg diff prod..cur ubuntu-security --source='php8*' --files``
+lists what to copy: every pool file cur names and prod does not, in
+every component and architecture, with the release it belongs to, its
+size and sha256 from the signed index, and the path to fetch it at. A
+stage is what its prefix serves, taken from ``_history/``.
+`FAQ.rst <FAQ.rst>`_ walks through the whole procedure.
 
 
 What upstreams must provide

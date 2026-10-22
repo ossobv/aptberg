@@ -74,6 +74,11 @@ Relative paths in the config resolve against its directory. Then::
     aptberg verify              # every prefix: ETags vs the signed MD5s
     aptberg verify ubuntu/prod --deep                # hash every index too
     aptberg verify ubuntu/prod --url=http://aptberg.example.com # as apt sees it
+    aptberg diff prod..acc      # OLD..NEW: what the next promotion brings
+    aptberg diff acc..cur       # what the next cut of acc brings
+    aptberg diff prod..cur ubuntu-security          # what cur has over prod
+    aptberg diff prod..cur ubuntu-security --source='php8*' --files
+                               # the new .debs: release, size, sha256, path
     aptberg history ubuntu/prod                     # what changed, when
     aptberg history ubuntu/prod --at=2026-09-14T03:00 --verify
     aptberg backfill --dry-run  # after widening a filter: what live

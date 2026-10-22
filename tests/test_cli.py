@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -255,35 +256,79 @@ def test_diff_via_cli(tmp_path, monkeypatch, capsys):
     "diff reports what changed between two cut snapshots"
     w, config = _setup(tmp_path, monkeypatch)
     move_noble(w)
-    assert (
-        cli.main(
-            ['-c', config, 'diff', 'ubuntu', 'noble', '20260922a', '20260922b']
-        )
-        == 0
-    )
+    args = ['-c', config, 'diff', '20260922a..20260922b', '--suite=noble']
+    assert cli.main(args) == 0
     out = capsys.readouterr().out
-    assert 'main/binary-amd64:' in out
+    assert 'ubuntu noble: 20260922a -> 20260922b' in out
+    assert '  main/binary-amd64:' in out
     assert 'app 1.0 -> 2.0' in out
     assert 'unwanted 1.0 -> (none)' in out
 
-    assert (
-        cli.main(
-            ['-c', config, 'diff', 'ubuntu', 'noble', '20260922a', '20260922a']
-        )
-        == 0
-    )
+    args = ['-c', config, 'diff', '20260922a..20260922a', '--suite=noble']
+    assert cli.main(args) == 0
     assert 'no package differences' in capsys.readouterr().out
+
+
+def _served_acc_cur(w, config):
+    "acc serves 20260922a, cur 20260922b"
+    move_noble(w, stage='cur')
+    for prefix in ('ubuntu/acc', 'ubuntu/cur'):
+        assert cli.main(['-c', config, 'apply', prefix]) == 0
+
+
+def test_diff_stages(tmp_path, monkeypatch, capsys, caplog):
+    "diff acc..cur: each suite's snapshot as its prefix serves it"
+    w, config = _setup(tmp_path, monkeypatch)
+    assert cli.main(['-c', config, 'diff', 'acc..cur']) == 1
+    assert 'serves nothing' in caplog.text
+    assert 'no suite to compare' in caplog.text
+    _served_acc_cur(w, config)
+    capsys.readouterr()
+    assert cli.main(['-c', config, 'diff', 'acc..cur', 'ubuntu']) == 0
+    out = capsys.readouterr().out
+    assert 'ubuntu noble: 20260922a -> 20260922b' in out
+    assert 'app 1.0 -> 2.0' in out
+    assert cli.main(['-c', config, 'diff', 'acc..acc']) == 0
+    assert 'no package differences in acc..acc' in capsys.readouterr().out
+    assert cli.main(['-c', config, 'diff', 'acc', 'cur']) == 1
+    assert "not OLD..NEW: 'acc'" in caplog.text
+    assert cli.main(['-c', config, 'diff', 'cur..acc']) == 0
+    assert 'for what is coming, try acc..cur' in caplog.text
+
+
+def test_diff_files(tmp_path, monkeypatch, capsys):
+    "diff --files: one line per new pool file, to fetch and check"
+    w, config = _setup(tmp_path, monkeypatch)
+    _served_acc_cur(w, config)
+    capsys.readouterr()
+    args = ['-c', config, 'diff', 'acc..cur', '--files']
+    assert cli.main(args) == 0
+    lines = capsys.readouterr().out.splitlines()
+    content = b'app 2.0 amd64'
+    assert lines == [
+        '# codename component size sha256 path',
+        f'noble main {len(content)} {hashlib.sha256(content).hexdigest()} '
+        'ubuntu/ch/cur/pool/main/a/app/app_2.0_amd64.deb',
+    ]
+    assert cli.main([*args, '--source=nomatch']) == 0
+    assert 'no new pool files' in capsys.readouterr().out
+    assert cli.main([*args, '--json']) == 0
+    (got,) = json.loads(capsys.readouterr().out)
+    assert got['package'] == 'app' and got['version'] == '2.0'
 
 
 def test_diff_json(tmp_path, monkeypatch, capsys):
     "diff --json: added, removed and changed per index, for programs"
     w, config = _setup(tmp_path, monkeypatch)
     move_noble(w)
-    args = ['-c', config, 'diff', 'ubuntu', 'noble', '20260922a', '20260922b']
+    args = ['-c', config, 'diff', '20260922a..20260922b', '--suite=noble']
     assert cli.main([*args, '--json']) == 0
-    got = json.loads(capsys.readouterr().out)['main/binary-amd64']
-    assert got['changed']['app'] == ['1.0', '2.0']
-    assert 'unwanted' in got['removed']
+    (got,) = json.loads(capsys.readouterr().out)
+    assert got['upstream'] == 'ubuntu' and got['suite'] == 'noble'
+    assert got['a'] == '20260922a' and got['b'] == '20260922b'
+    head = got['heads']['main/binary-amd64']
+    assert head['changed']['app'] == ['1.0', '2.0']
+    assert 'unwanted' in head['removed']
 
 
 def _fail_store(cfg):

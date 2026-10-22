@@ -251,3 +251,89 @@ Point only the expiring suites at ``cur`` and leave the rest on ``prod``::
 The two mix: ``-security`` from ``cur``, ``-updates`` and ``-backports``
 on ``prod`` with ``valid-until-min``. Do not move the whole host to
 ``cur`` for this; only these suites expire.
+
+
+How do I rush an urgent fix to prod without rushing everything else?
+--------------------------------------------------------------------
+
+Say ``ubuntu-security`` has a php fix that ``prod`` hosts need today.
+Promoting ``ubuntu-security`` would bring every other package in that
+suite along, without its soak. Instead, copy only the fixed ``.deb``
+files into a PPA of your own and move that through ``cur``, ``acc``
+and ``prod``. Here both are called ``emergency``: the PPA is a set of
+aptly repositories ``emergency/<codename>`` on a PPA host, filled by
+hand, and aptberg mirrors it as the upstream ``emergency``, which every
+host already has in its sources. Copy the upstream files as they are,
+not rebuilt: the same name, version and hash in two repositories is
+one version to apt, so nothing needs pinning, and nothing conflicts
+once the regular suite catches up.
+
+1. Make sure ``cur`` has the fix::
+
+       aptberg sync --apply debian-security ubuntu-security
+       aptberg diff prod..cur debian-security ubuntu-security --source='php8*'
+
+2. List the files ``cur`` has and ``prod`` does not, and read the list::
+
+       aptberg diff prod..cur debian-security ubuntu-security \
+           --source='php8*' --files > files.txt
+
+   One line per file, after a ``#`` header: codename, component, size,
+   sha256 and the path below the host. The sha256 comes from the
+   upstream's signed index, so a file that matches it is the upstream's
+   file. ``--source`` matches the source package, so
+   ``libapache2-mod-php8.5`` and the ``universe`` binaries come along;
+   every component and architecture is listed.
+
+3. On the PPA host, in a directory with one subdirectory per codename,
+   fetch each file, check it, and add it to that codename's aptly
+   repository:
+
+   .. code-block:: sh
+
+       baseurl=http://aptberg.example.com
+       aptly_prefix=emergency/
+
+       success=true
+       while read codename component size hash debpath; do
+           case $codename in '#'*) continue;; esac
+           lofile="$codename/${debpath##*/}"
+           test -d "$codename" || {
+               echo "missing $codename dir" >&2; success=false; break; }
+           test -f "$lofile" ||
+               wget -qO "$lofile" "$baseurl/$debpath" || {
+                   rm -f "$lofile"; success=false; break; }
+           lohash=$(openssl sha256 -hex "$lofile" | sed -e 's/.*= //')
+           if test "$hash" != "$lohash"; then
+               echo "hash mismatch: $lofile $hash $lohash" >&2
+               success=false; break
+           fi
+           aptly repo add "${aptly_prefix}${codename}" "$lofile" || {
+               success=false; break; }
+       done < files.txt
+
+       $success && echo OK || echo FAILED
+       $success
+
+   Then publish the updated repositories as usual (``aptly snapshot create`` +
+   ``aptly publish snapshot``).
+
+4. Mirror the PPA into ``cur`` as the ``emergency`` upstream, and check
+   that it carries the files::
+
+       aptberg sync --apply emergency
+       aptberg diff acc..cur emergency
+
+5. If your hosts are configured to use the ``cur`` branch of the emergency
+   mirror, you're done. If it's set to ``acc`` or ``prod``, then promote both::
+
+       aptberg promote --stage=cur emergency --apply
+       aptberg promote --stage=acc emergency --apply
+
+   Commit the changed manifests, as after any promotion.
+
+6. Remove the copies again once the regular suite has caught up: when
+   ``aptberg diff prod..cur debian-security ubuntu-security --source='php8*'``
+   no longer shows the versions you copied, ``prod`` serves them itself. Remove
+   them from the PPA, publish, and take it through steps 4 and 5 again.  Until
+   then, nothing breaks: hosts see one version in two places.

@@ -324,7 +324,7 @@ The jobs above apply as they go. Without ``--apply``, cut and promote
 only write manifests, and you decide when a prefix changes::
 
     aptberg promote --stage=cur ubuntu  # writes ubuntu*/acc.yaml
-    aptberg diff ubuntu noble-updates 20261002a 20261009a
+    aptberg diff acc..cur ubuntu ubuntu-security  # what acc will get
     aptberg apply ubuntu/acc ubuntu-security/acc --dry-run
     aptberg apply ubuntu/acc ubuntu-security/acc
 
