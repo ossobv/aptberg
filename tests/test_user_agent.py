@@ -1,6 +1,8 @@
+import os
 import subprocess
 from datetime import datetime, timezone
 
+import pytest
 from botocore.awsrequest import AWSResponse
 
 from aptberg import __version__, git_version, user_agent
@@ -61,6 +63,13 @@ def test_config_contact(tmp_path):
     )
     cfg = load(tmp_path / 'aptberg.yaml')
     assert cfg.user_agent == f'aptberg/{__version__} (ops@example.com)'
+
+
+@pytest.fixture(autouse=True)
+def _no_git_config(monkeypatch):
+    "Keep the end-user's git config (commit/tag signing, ...) out of it"
+    monkeypatch.setenv('GIT_CONFIG_GLOBAL', os.devnull)
+    monkeypatch.setenv('GIT_CONFIG_NOSYSTEM', '1')
 
 
 def _git(root, *args):
