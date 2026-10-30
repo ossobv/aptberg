@@ -33,6 +33,8 @@ import gzip
 import lzma
 import sys
 from collections import defaultdict
+from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
@@ -50,26 +52,30 @@ DECOMPRESS = {
 }
 TOP_DEFAULT = 25
 
+Fetch = Callable[[str], bytes | None]
 
-def get(url: str) -> bytes | None:
-    "GET url, or None on a 404"
+
+def http_get(url: str, http_missing_codes: tuple[int, ...] = (404,)
+             ) -> bytes | None:
+    "GET url, or None if the status is in http_missing_codes"
     try:
         with urlopen(Request(url, headers={"User-Agent": UA}),
                      timeout=30) as resp:
             return resp.read()
     except HTTPError as exc:
-        if exc.code == 404:
+        if exc.code in http_missing_codes:
             return None
+        exc.add_note(f"url = {url!r}")
         raise
 
 
-def release_stanza(base: str) -> dict[str, str]:
+def release_stanza(fetch: Fetch, base: str) -> dict[str, str]:
     "The parsed Release of one suite, from InRelease or Release"
-    data = get(f"{base}/InRelease")
+    data = fetch(f"{base}/InRelease")
     if data is not None:
         text = _unclearsign(data.decode("utf-8", "replace"))
     else:
-        data = get(f"{base}/Release")
+        data = fetch(f"{base}/Release")
         if data is None:
             raise SystemExit(f"{base}: no InRelease or Release")
         text = data.decode("utf-8", "replace")
@@ -90,20 +96,21 @@ def _unclearsign(text: str) -> str:
     return "\n".join(lines[start:end])
 
 
-def packages(base: str, component: str, arch: str) -> list[dict[str, str]]:
+def packages(fetch: Fetch, base: str, component: str, arch: str
+             ) -> list[dict[str, str]]:
     "Every stanza of one component/binary-<arch>/Packages, or []"
     for ext in (".gz", ".xz", ".bz2", ""):
-        data = get(f"{base}/{component}/binary-{arch}/Packages{ext}")
+        data = fetch(f"{base}/{component}/binary-{arch}/Packages{ext}")
         if data is not None:
             text = DECOMPRESS[ext](data).decode("utf-8", "replace")
             return list(stanzas(text.splitlines()))
     return []
 
 
-def sources(base: str, component: str) -> list[dict[str, str]]:
+def sources(fetch: Fetch, base: str, component: str) -> list[dict[str, str]]:
     "Every stanza of one component/source/Sources, or [] (none published)"
     for ext in (".gz", ".xz", ".bz2", ""):
-        data = get(f"{base}/{component}/source/Sources{ext}")
+        data = fetch(f"{base}/{component}/source/Sources{ext}")
         if data is not None:
             text = DECOMPRESS[ext](data).decode("utf-8", "replace")
             return list(stanzas(text.splitlines()))
@@ -187,6 +194,10 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
                         help=f"biggest package names to list "
                              f"(default: {TOP_DEFAULT})")
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--403-as-404", action="store_true",
+                        dest="forbidden_is_missing",
+                        help="treat HTTP 403 like 404 (e.g. S3 buckets "
+                             "without ListBucket)")
     return parser.parse_args(argv)
 
 
@@ -199,6 +210,9 @@ def main(argv: list[str] | None = None) -> int:
     include = args.include or (["*"] if filtering else [])
     follow = tuple(args.follow) if args.follow else FOLLOW
 
+    http_missing_codes = (403, 404) if args.forbidden_is_missing else (404,)
+    fetch = partial(http_get, http_missing_codes=http_missing_codes)
+
     # Filename -> (Size, Package); a shared _pool/ dedups the same way.
     pool: dict[str, tuple[int, str]] = {}
     # Filename -> (Size, Binary: names, source Package); same dedup.
@@ -208,7 +222,7 @@ def main(argv: list[str] | None = None) -> int:
     src_report = []
     for suite in args.suites:
         base = f"{url}/dists/{suite}"
-        release = release_stanza(base)
+        release = release_stanza(fetch, base)
         have_components = set(release.get("Components", "").split())
         have_archs = set(release.get("Architectures", "").split())
         for component in components:
@@ -222,7 +236,7 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"warning: {suite}: architecture {arch!r} not "
                           f"in Release ({sorted(have_archs)})",
                           file=sys.stderr)
-                stanzas_here = packages(base, component, arch)
+                stanzas_here = packages(fetch, base, component, arch)
                 count, added = 0, 0
                 for stanza in stanzas_here:
                     count += 1
@@ -237,7 +251,7 @@ def main(argv: list[str] | None = None) -> int:
                         (suite, component, arch, count, added))
             if args.deb_src:
                 count, added = 0, 0
-                for stanza in sources(base, component):
+                for stanza in sources(fetch, base, component):
                     count += 1
                     names = frozenset(binary_names(stanza.get("Binary", "")))
                     pkg = stanza.get("Package", "")
