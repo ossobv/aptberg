@@ -95,21 +95,23 @@ class Store:
     ) -> None:
         self.bucket = bucket
         self.concurrency = concurrency
-        self.s3 = boto3.client(
-            's3',
-            endpoint_url=endpoint,
-            region_name=region,
-            config=Config(
-                retries={'mode': 'adaptive', 'max_attempts': 10},
-                # boto3's own User-Agent, with ours appended
-                user_agent_extra=agent or user_agent(),
-                max_pool_connections=max(64, concurrency * 8),
-                # boto3 >= 1.36 adds CRC checksums to every upload by
-                # default, which older Ceph RGW releases reject.
-                request_checksum_calculation='when_required',
-                response_checksum_validation='when_required',
-            ),
-        )
+        # An AWS_PROFILE that names no profile already fails here.
+        with _wrapped(f'cannot use s3://{bucket}'):
+            self.s3 = boto3.client(
+                's3',
+                endpoint_url=endpoint,
+                region_name=region,
+                config=Config(
+                    retries={'mode': 'adaptive', 'max_attempts': 10},
+                    # boto3's own User-Agent, with ours appended
+                    user_agent_extra=agent or user_agent(),
+                    max_pool_connections=max(64, concurrency * 8),
+                    # boto3 >= 1.36 adds CRC checksums to every upload
+                    # by default, which older Ceph RGW releases reject.
+                    request_checksum_calculation='when_required',
+                    response_checksum_validation='when_required',
+                ),
+            )
         events = self.s3.meta.events
         events.unregister(
             'before-parameter-build.s3', handlers.validate_bucket_name

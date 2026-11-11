@@ -334,6 +334,17 @@ def test_check_bad_credentials(monkeypatch):
         store.check()
 
 
+def test_unknown_profile(monkeypatch, tmp_path):
+    "An AWS_PROFILE naming no profile is a clear StoreError, not raw"
+    config = tmp_path / 'config'
+    config.write_text('[profile other]\n')
+    monkeypatch.setenv('AWS_CONFIG_FILE', str(config))
+    monkeypatch.setenv('AWS_SHARED_CREDENTIALS_FILE', str(config))
+    monkeypatch.setenv('AWS_PROFILE', 'nosuch')
+    with pytest.raises(StoreError, match='s3://bkt.*profile .nosuch.'):
+        Store('bkt')
+
+
 def test_list_etags(monkeypatch):
     "Sizes and unquoted ETags"
     store, stub = _store(monkeypatch)
