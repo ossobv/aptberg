@@ -328,9 +328,10 @@ patched into a frozen snapshot. Publish it in a PPA of your own instead
 like any upstream, and remove it once the regular suite catches up.
 ``aptberg diff prod..cur ubuntu-security --source='php8*' --files``
 lists what to copy: every pool file cur names and prod does not, in
-every component and architecture, with the release it belongs to, its
-size and sha256 from the signed index, and the path to fetch it at. A
-stage is what its prefix serves, taken from ``_history/``.
+every component and architecture, with the release it belongs to, the
+suites naming it, its size and sha256 from the signed index, and the
+path to fetch it at. A stage is what its prefix serves, taken from
+``_history/``.
 `FAQ.rst <FAQ.rst>`_ walks through the whole procedure.
 
 

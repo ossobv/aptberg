@@ -7,12 +7,21 @@ from types import SimpleNamespace
 import pytest
 
 from aptberg import cli, sync
-from aptberg.pool import Selection, SyncResult
+from aptberg.fetch import fetch_suite
+from aptberg.pool import Selection, SyncResult, select
 from aptberg.snapshot import record
 from aptberg.store import StoreError
 from aptberg.sync import Scope, Sync
 
-from .helpers import World, group_world, move_noble, signer, stanza
+from .helpers import (
+    SEC,
+    UP,
+    World,
+    group_world,
+    move_noble,
+    signer,
+    stanza,
+)
 
 POOL_PREFIX = '_pool/_shared/'
 
@@ -306,8 +315,8 @@ def test_diff_files(tmp_path, monkeypatch, capsys):
     lines = capsys.readouterr().out.splitlines()
     content = b'app 2.0 amd64'
     assert lines == [
-        '# codename component size sha256 path',
-        f'noble main {len(content)} {hashlib.sha256(content).hexdigest()} '
+        '# codename suites component size sha256 path',
+        f'noble noble main {len(content)} {hashlib.sha256(content).hexdigest()} '
         'ubuntu/ch/cur/pool/main/a/app/app_2.0_amd64.deb',
     ]
     assert cli.main([*args, '--source=nomatch']) == 0
@@ -315,6 +324,71 @@ def test_diff_files(tmp_path, monkeypatch, capsys):
     assert cli.main([*args, '--json']) == 0
     (got,) = json.loads(capsys.readouterr().out)
     assert got['package'] == 'app' and got['version'] == '2.0'
+    assert got['codename'] == 'noble' and got['suites'] == ['noble']
+
+
+GROUP_CONFIG = (
+    'scratch: scratch\nbucket: bkt\nmanifests: manifests\n'
+    'upstreams:\n'
+    '  ubuntu:\n    group: ubuntu\n    url: http://up.example/ubuntu\n'
+    '    keyring: {keyring}\n    pool: _shared\n'
+    '    suites:\n      noble: [main]\n      noble-updates: [main]\n'
+    '    architectures: [amd64]\n'
+    '  ubuntu-security:\n    group: ubuntu\n'
+    '    url: http://up.example/ubuntu\n'
+    '    keyring: {keyring}\n    pool: _shared\n'
+    '    suites:\n      noble-security: [main]\n'
+    '    architectures: [amd64]\n'
+)
+
+
+def _cut_cur(w, config, up, suite, packages):
+    "Republish suite with packages, cut it as cur and apply that"
+    w.archive.add_suite(
+        '/ubuntu', suite, {'main/binary-amd64': packages}, codename='noble'
+    )
+    fs = fetch_suite(
+        w.archive.client(), up, up.sources()[0], suite, w.tmp_path / 'scratch'
+    )
+    w.suites = [fs if s.suite == suite else s for s in w.suites]
+    w.selection = select(w.suites)
+    w.sync_pool()
+    record(w.cut(fs), w.tmp_path / 'manifests', 'bkt', stage='cur')
+    assert cli.main(['-c', config, 'apply', f'{up.name}/cur']) == 0
+
+
+def test_diff_group_files(tmp_path, monkeypatch, capsys):
+    "diff names a group: its -updates and -security, a shared file once"
+    w = group_world(tmp_path)
+    config = tmp_path / 'aptberg.yaml'
+    config.write_text(GROUP_CONFIG.format(keyring=signer().keyring))
+    config = str(config)
+    monkeypatch.setattr(cli, '_store', lambda cfg: w.store)
+    fix = stanza('app', '1.0.3', Depends='libfoo')
+    _cut_cur(w, config, UP, 'noble-updates', [fix])
+    _cut_cur(w, config, SEC, 'noble-security', [fix])
+    _cut_cur(w, config, UP, 'noble', [stanza('app'), stanza('extra')])
+    capsys.readouterr()
+    args = ['-c', config, 'diff', 'acc..cur']
+    assert cli.main([*args, 'ubuntu', '--files']) == 0
+    lines = capsys.readouterr().out.splitlines()
+    fixed = b'app 1.0.3 amd64'
+    extra = b'extra 1.0 amd64'
+    assert lines == [
+        '# codename suites component size sha256 path',
+        f'noble noble-security,noble-updates main {len(fixed)} '
+        f'{hashlib.sha256(fixed).hexdigest()} '
+        'ubuntu/ch/cur/pool/main/a/app/app_1.0.3_amd64.deb',
+        f'noble noble main {len(extra)} {hashlib.sha256(extra).hexdigest()} '
+        'ubuntu/ch/cur/pool/main/e/extra/extra_1.0_amd64.deb',
+    ]
+    # A member that is not the group's namesake means only itself.
+    assert cli.main([*args, 'ubuntu-security', '--files']) == 0
+    (_, line) = capsys.readouterr().out.splitlines()
+    assert line.startswith('noble noble-security main ')
+    assert line.endswith(
+        ' ubuntu-security/ch/cur/pool/main/a/app/app_1.0.3_amd64.deb'
+    )
 
 
 def test_diff_json(tmp_path, monkeypatch, capsys):

@@ -499,11 +499,13 @@ def _add_diff(sub: 'argparse._SubParsersAction') -> None:
             'or a snapshot ref ([TREE/]ID, with --suite). '
             'Indexes are never filtered, so this is what a client would '
             'see, not just what the pool holds. Without upstreams, '
-            'every upstream; naming one does not add the rest of its '
-            'group. With --files, the pool files NEW names and OLD does '
-            'not instead: one line per file, with the codename, '
-            'component, size, sha256 and the path under the NEW prefix '
-            'to fetch it from. '
+            "every upstream. A group's name means the whole group, "
+            'even where a member shares it: ubuntu is ubuntu and '
+            'ubuntu-security. Any other member means only itself. '
+            'With --files, the pool files NEW names and OLD does '
+            'not instead: one line per file, with the codename, the '
+            'suites naming it, component, size, sha256 and the path '
+            'under the NEW prefix to fetch it from. '
             'Example: diff prod..cur ubuntu-security '
             "--source='php8*' --files"
         ),
@@ -987,10 +989,18 @@ def cmd_diff(args: argparse.Namespace) -> int:
             b,
             a,
         )
+    groups = cfg.groups()
     names = []
     for name in args.names or cfg.upstreams:
-        # A group's name means its members; a member means only itself.
-        named = [name] if name in cfg.upstreams else cfg.expand([name])
+        # A group's name means its members, also where one of them has
+        # the same name: diff ubuntu shows -updates and -security alike.
+        # Any other member means only itself.
+        if name in groups:
+            named = groups[name]
+        elif name in cfg.upstreams:
+            named = [name]
+        else:
+            named = cfg.expand([name])
         names += [n for n in named if n not in names]
     store = _store(cfg)
     pairs = diff.pairs(
@@ -1073,24 +1083,37 @@ def _diff_files(
 
     A file several suites of one release name (noble-updates and
     noble-security often carry the same fix, under ubuntu/ and
-    ubuntu-security/) is listed once, at the first path found: a copy
-    of it goes into that release once.
+    ubuntu-security/) is listed once, at the first path found, with
+    every suite that names it: a copy of it goes into that release
+    once, and the suites tell a security fix from a plain update.
     """
-    files = {}
+    files: dict[tuple[str, str, str], diff.PoolFile] = {}
+    suites: dict[tuple[str, str, str], set[str]] = {}
     for pair in pairs:
         for f in diff.new_files(store, pair, args.sources):
-            files.setdefault((f.codename, f.component, f.sha256), f)
-    found = sorted(files.values())
+            key = (f.codename, f.component, f.sha256)
+            files.setdefault(key, f)
+            suites.setdefault(key, set()).add(pair.suite)
+    found = sorted(files.items(), key=lambda kv: kv[1])
     if args.json:
-        print(json.dumps([f.to_dict() for f in found], indent=1))
+        print(
+            json.dumps(
+                [
+                    f.to_dict() | {'suites': sorted(suites[k])}
+                    for k, f in found
+                ],
+                indent=1,
+            )
+        )
         return 0
     if not found:
         print(f'no new pool files in {args.range}')
         return 0
-    print('# codename component size sha256 path')
-    for f in found:
+    print('# codename suites component size sha256 path')
+    for key, f in found:
         print(
-            f'{f.codename} {f.component or "-"} {f.size} {f.sha256} {f.path}'
+            f'{f.codename} {",".join(sorted(suites[key]))} '
+            f'{f.component or "-"} {f.size} {f.sha256} {f.path}'
         )
     return 0
 

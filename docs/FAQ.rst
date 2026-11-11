@@ -278,8 +278,10 @@ once the regular suite catches up.
        aptberg diff prod..cur debian-security ubuntu-security \
            --source='php8*' --files > files.txt
 
-   One line per file, after a ``#`` header: codename, component, size,
-   sha256 and the path below the host. The sha256 comes from the
+   One line per file, after a ``#`` header: codename, the suites naming
+   the file (``noble-security,noble-updates``: comma-separated, so a
+   security fix is told from a plain update), component, size, sha256
+   and the path below the host. The sha256 comes from the
    upstream's signed index, so a file that matches it is the upstream's
    file. ``--source`` matches the source package, so
    ``libapache2-mod-php8.5`` and the ``universe`` binaries come along;
@@ -291,28 +293,42 @@ once the regular suite catches up.
 
    .. code-block:: sh
 
+       #!/bin/sh
+       set -eu
+
+       codenames='jammy noble resolute'
+       mkdir $codenames || true
+
        baseurl=http://aptberg.example.com
        aptly_prefix=emergency/
 
        success=true
-       while read codename component size hash debpath; do
+       while read codename suite component size hash debpath; do
            case $codename in '#'*) continue;; esac
            lofile="$codename/${debpath##*/}"
            test -d "$codename" || {
                echo "missing $codename dir" >&2; success=false; break; }
-           test -f "$lofile" ||
+           test -f "$lofile" || {
                wget -qO "$lofile" "$baseurl/$debpath" || {
                    rm -f "$lofile"; success=false; break; }
+               echo "DL: $lofile"; }
            lohash=$(openssl sha256 -hex "$lofile" | sed -e 's/.*= //')
            if test "$hash" != "$lohash"; then
                echo "hash mismatch: $lofile $hash $lohash" >&2
                success=false; break
            fi
-           aptly repo add "${aptly_prefix}${codename}" "$lofile" || {
-               success=false; break; }
        done < files.txt
 
-       $success && echo OK || echo FAILED
+       $success && echo OK-DOWNLOAD || echo FAILED-DOWNLOAD
+       $success
+
+       success=true
+       for codename in $codenames; do
+           aptly repo add "${aptly_prefix}${codename}" "$codename/"* || {
+               success=false; break; }
+       done
+
+       $success && echo OK-REPO-ADD || echo FAILED-REPO-ADD
        $success
 
    Then publish the updated repositories as usual (``aptly snapshot create`` +
