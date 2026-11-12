@@ -331,7 +331,10 @@ lists what to copy: every pool file cur names and prod does not, in
 every component and architecture, with the release it belongs to, the
 suites naming it, its size and sha256 from the signed index, and the
 path to fetch it at. A stage is what its prefix serves, taken from
-``_history/``.
+``_history/``. Only files the pool holds are listed (an old kernel ABI a
+filter left out is named by the index but cannot be fetched), as diff
+only counts packages a host can install; ``--unmirrored`` lists what
+the indexes name.
 `FAQ.rst <FAQ.rst>`_ walks through the whole procedure.
 
 

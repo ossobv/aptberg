@@ -285,7 +285,8 @@ once the regular suite catches up.
    upstream's signed index, so a file that matches it is the upstream's
    file. ``--source`` matches the source package, so
    ``libapache2-mod-php8.5`` and the ``universe`` binaries come along;
-   every component and architecture is listed.
+   every component and architecture is listed. Files the filter left
+   out of the pool are not: they cannot be fetched.
 
 3. On the PPA host, in a directory with one subdirectory per codename,
    fetch each file, check it, and add it to that codename's aptly

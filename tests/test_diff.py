@@ -16,11 +16,11 @@ from aptberg.diff import (
 from aptberg.fetch import fetch_suite
 from aptberg.manifest import Manifest, ManifestError, Ref
 from aptberg.plan import build
-from aptberg.pool import select
+from aptberg.pool import select, storage_key
 from aptberg.promote import units
 from aptberg.snapshot import record
 
-from .helpers import SEC, UP, UPG, World, group_world, stanza
+from .helpers import SEC, UBUNTU, UP, UPG, World, group_world, stanza
 
 
 def _recut_noble(w, packages):
@@ -61,6 +61,32 @@ def test_diff_added_removed_changed(tmp_path):
     assert d.added == {'newpkg': '1.0'}
     assert d.removed == {'unwanted': '1.0'}
     assert d.changed == {'app': ('1.0', '2.0')}
+
+
+def test_diff_mirrored_only(tmp_path):
+    "With pool, a package the filter left out of the pool is no difference"
+    w = World(tmp_path)
+    w.sync_pool()
+    ref_a = w.cut(w.suite('noble')).ref
+    ref_b = _recut_noble(
+        w,
+        [
+            stanza('app', '2.0', Depends='libfoo'),
+            stanza('libfoo'),
+            stanza('newpkg'),
+        ],
+    ).ref
+    result = diff_suite(w.store, 'ubuntu', 'noble', ref_a, ref_b, pool=UBUNTU)
+    # newpkg and unwanted are in the indexes only: the filter takes app.
+    d = result['main/binary-amd64']
+    assert (d.added, d.removed) == ({}, {})
+    assert d.changed == {'app': ('1.0', '2.0')}
+
+    # A new version the pool does not hold is gone from that side.
+    key = storage_key(UBUNTU, 'pool/main/a/app/app_2.0_amd64.deb')
+    w.store.delete(key)
+    result = diff_suite(w.store, 'ubuntu', 'noble', ref_a, ref_b, pool=UBUNTU)
+    assert result['main/binary-amd64'].removed == {'app': '1.0'}
 
 
 def test_diff_no_changes(tmp_path):
@@ -235,6 +261,20 @@ def test_new_files(tmp_path):
         'libphp8.5-embed': '8.5.4-1',
         'php8.5-cli': '8.5.4-1',
     }
+
+
+def test_new_files_mirrored(tmp_path):
+    "With mirrored, only the new files the pool holds"
+    w = group_world(tmp_path)
+    php = [stanza('php8.5-cli', '8.5.4-1', Source='php8.5')]
+    _security_cur(w, [stanza('app', '1.0.3', Depends='libfoo'), *php])
+    (pair,) = _pairs(w, 'acc..cur', suites=['noble-security'])
+    assert [f.package for f in new_files(w.store, pair)] == [
+        'app',
+        'php8.5-cli',
+    ]
+    got = new_files(w.store, pair, mirrored=True)
+    assert [(f.package, f.version) for f in got] == [('app', '1.0.3')]
 
 
 def test_new_files_missing_side(tmp_path):

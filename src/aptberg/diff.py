@@ -1,10 +1,20 @@
 """Package-level diff between two snapshots of the same suite
 
 Reads the Packages indexes two already-cut snapshots recorded (from
-their snapshot.json entries, not the live filter selection: indexes are
-never filtered, only the pool, so this sees exactly what a client would
-see) and reports, per component/architecture, which packages were
-added, removed, or changed version.
+their snapshot.json entries, not the live filter selection) and
+reports, per component/architecture, which packages were added,
+removed, or changed version.
+
+Indexes are never filtered, only the pool: a filtered upstream's
+indexes name packages whose file was never fetched (old kernel ABIs,
+say), which a client sees but cannot install. With pool= (diff_suite)
+or mirrored= (new_files), a package counts only on a side whose pool
+holds its file, so what is left is what a host can install. Only the
+files of packages that differ are looked up, one HEAD each, in
+parallel: a pool is far too big to list for a diff. Presence is what
+counts, not the filter: the closure that picked the files spans the
+whole family and every upstream sharing it, and a file a filter
+dropped since is still in the pool for the snapshots naming it.
 
 A side is a snapshot ref, or a stage: for each suite, the snapshot that
 stage's prefix serves now. That is taken from the prefix's _history/
@@ -25,6 +35,7 @@ repository that wants source too.
 
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from fnmatch import fnmatchcase
 
@@ -36,6 +47,7 @@ from .history import events, state_at
 from .layout import dists as served_dists
 from .layout import owner
 from .manifest import CUT_STAGE, STAGES, Ref, prefix_name
+from .pool import storage_key
 from .promote import Unit
 from .release import Entry, family
 from .snapshot import MARKER, snapshot_root
@@ -251,23 +263,48 @@ def diff_suite(
     ref_a: Ref | None,
     ref_b: Ref | None,
     sources: list[str] | None = None,
+    concurrency: int = 8,
+    pool: Upstream | None = None,
 ) -> dict[str, PackageDiff]:
     """Non-empty PackageDiffs by head (e.g. main/binary-amd64), sorted
 
     A ref of None is a side without the suite: everything the other
     side has is added (or removed). sources keeps only the packages
-    built from a source package matching one of these globs.
+    built from a source package matching one of these globs. With
+    pool, the upstream whose _pool/ the files are in, a package whose
+    file that pool does not hold is absent from that side: one only the
+    indexes name is no difference at all, and one whose new version was
+    not mirrored is removed.
     """
-    packages_a = _versions(_read(store, upstream, suite, ref_a, sources)[1])
-    packages_b = _versions(_read(store, upstream, suite, ref_b, sources)[1])
+    packages_a = _by_name(_read(store, upstream, suite, ref_a, sources)[1])
+    packages_b = _by_name(_read(store, upstream, suite, ref_b, sources)[1])
+    # The names whose version differs, by head; with pool, the files
+    # of both sides' stanzas of them are the only ones looked up.
+    differ: dict[str, list[str]] = {}
+    files: set[str] = set()
+    for head in set(packages_a) | set(packages_b):
+        a = packages_a.get(head, {})
+        b = packages_b.get(head, {})
+        differ[head] = []
+        for name in sorted(set(a) | set(b)):
+            sa, sb = a.get(name), b.get(name)
+            if _version(sa) != _version(sb):
+                differ[head].append(name)
+                files.update(
+                    s['Filename'] for s in (sa, sb) if s and 'Filename' in s
+                )
+    held = None if pool is None else _held(store, pool, files, concurrency)
     out = {}
-    for head in sorted(set(packages_a) | set(packages_b)):
+    dropped = 0
+    for head, names in sorted(differ.items()):
         a = packages_a.get(head, {})
         b = packages_b.get(head, {})
         d = PackageDiff()
-        for name in sorted(set(a) | set(b)):
-            va, vb = a.get(name), b.get(name)
+        for name in names:
+            va = _version(a.get(name), held)
+            vb = _version(b.get(name), held)
             if va == vb:
+                dropped += 1
                 continue
             elif va is None:
                 d.added[name] = vb
@@ -277,11 +314,22 @@ def diff_suite(
                 d.changed[name] = (va, vb)
         if d:
             out[head] = d
+    if dropped:
+        log.info(
+            '%s %s: %d package differences left out: not in the pool',
+            upstream,
+            suite,
+            dropped,
+        )
     return out
 
 
 def new_files(
-    store: Store, pair: Pair, sources: list[str] | None = None
+    store: Store,
+    pair: Pair,
+    sources: list[str] | None = None,
+    concurrency: int = 8,
+    mirrored: bool = False,
 ) -> list[PoolFile]:
     """The pool files pair.b's indexes name and pair.a's do not, sorted
 
@@ -290,7 +338,8 @@ def new_files(
     listed once, not once per binary-<arch> index naming it. The
     codename is the release family of the suite (noble for
     noble-security): the release a copy of the file belongs to.
-    sources is as in diff_suite().
+    sources is as in diff_suite(). With mirrored, only the files the
+    pool holds: the ones a client can fetch.
     """
     name = pair.upstream.name
     _, old = _read(store, name, pair.suite, pair.a, sources)
@@ -315,6 +364,16 @@ def new_files(
                 int(s.get('Size') or 0),
                 s.get('SHA256', ''),
             )
+    if mirrored and out:
+        held = _held(store, pair.upstream, set(out), concurrency)
+        if len(held) < len(out):
+            log.info(
+                '%s %s: %d new files left out: not in the pool',
+                name,
+                pair.suite,
+                len(out) - len(held),
+            )
+        out = {k: v for k, v in out.items() if k in held}
     return sorted(out.values())
 
 
@@ -387,14 +446,45 @@ def _read(
     return marker, _packages(store, root, suite, marker, sources)
 
 
-def _versions(
+def _by_name(
     packages: dict[str, list[dict[str, str]]],
-) -> dict[str, dict[str, str]]:
-    "Every head's {package name: version}"
+) -> dict[str, dict[str, dict[str, str]]]:
+    "Every head's {package name: stanza}"
     return {
-        head: {s['Package']: s.get('Version', '') for s in heads}
+        head: {s['Package']: s for s in heads}
         for head, heads in packages.items()
     }
+
+
+def _version(
+    stanza: dict[str, str] | None,
+    held: set[str] | None = None,
+) -> str | None:
+    "A stanza's version; None without one, or with held not holding it"
+    if stanza is None:
+        return None
+    if held is not None and stanza.get('Filename') not in held:
+        return None
+    return stanza.get('Version', '')
+
+
+def _held(
+    store: Store,
+    upstream: Upstream,
+    filenames: set[str],
+    concurrency: int,
+) -> set[str]:
+    "The filenames whose file upstream's _pool/ holds, looked up in parallel"
+    names = sorted(filenames)
+    if not names:
+        return set()
+
+    def one(filename: str) -> bool:
+        return store.sha256(storage_key(upstream, filename)) is not None
+
+    with ThreadPoolExecutor(max_workers=max(1, concurrency)) as pool:
+        found = pool.map(one, names)
+        return {n for n, ok in zip(names, found, strict=True) if ok}
 
 
 def _snapshot(

@@ -497,8 +497,11 @@ def _add_diff(sub: 'argparse._SubParsersAction') -> None:
             'NEW are each a stage (cur, acc, prod: the snapshot its '
             'prefix serves now, from the bucket) '
             'or a snapshot ref ([TREE/]ID, with --suite). '
-            'Indexes are never filtered, so this is what a client would '
-            'see, not just what the pool holds. Without upstreams, '
+            'Indexes are never filtered, only the pool: a package whose '
+            'file the pool does not hold (a filter left it out) is '
+            'absent from that side, as no host can install it; '
+            '--unmirrored compares what the indexes name instead. '
+            'Without upstreams, '
             "every upstream. A group's name means the whole group, "
             'even where a member shares it: ubuntu is ubuntu and '
             'ubuntu-security. Any other member means only itself. '
@@ -548,6 +551,11 @@ def _add_diff(sub: 'argparse._SubParsersAction') -> None:
         '--files',
         action='store_true',
         help='list the pool files new in B, not the package changes',
+    )
+    df.add_argument(
+        '--unmirrored',
+        action='store_true',
+        help='also packages and files the pool does not hold',
     )
     df.add_argument(
         '--json', action='store_true', help='the same, for a program to read'
@@ -1013,7 +1021,7 @@ def cmd_diff(args: argparse.Namespace) -> int:
         args.codenames,
     )
     if args.files:
-        return _diff_files(args, store, pairs)
+        return _diff_files(args, store, pairs, cfg.concurrency)
     results = [
         (
             pair,
@@ -1024,6 +1032,8 @@ def cmd_diff(args: argparse.Namespace) -> int:
                 pair.a,
                 pair.b,
                 args.sources,
+                cfg.concurrency,
+                None if args.unmirrored else pair.upstream,
             ),
         )
         for pair in pairs
@@ -1077,7 +1087,10 @@ def cmd_diff(args: argparse.Namespace) -> int:
 
 
 def _diff_files(
-    args: argparse.Namespace, store: Store, pairs: list[diff.Pair]
+    args: argparse.Namespace,
+    store: Store,
+    pairs: list[diff.Pair],
+    concurrency: int,
 ) -> int:
     """aptberg diff --files
 
@@ -1090,7 +1103,13 @@ def _diff_files(
     files: dict[tuple[str, str, str], diff.PoolFile] = {}
     suites: dict[tuple[str, str, str], set[str]] = {}
     for pair in pairs:
-        for f in diff.new_files(store, pair, args.sources):
+        for f in diff.new_files(
+            store,
+            pair,
+            args.sources,
+            concurrency,
+            mirrored=not args.unmirrored,
+        ):
             key = (f.codename, f.component, f.sha256)
             files.setdefault(key, f)
             suites.setdefault(key, set()).add(pair.suite)

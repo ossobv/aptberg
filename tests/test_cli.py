@@ -271,7 +271,10 @@ def test_diff_via_cli(tmp_path, monkeypatch, capsys):
     assert 'ubuntu noble: 20260922a -> 20260922b' in out
     assert '  main/binary-amd64:' in out
     assert 'app 1.0 -> 2.0' in out
-    assert 'unwanted 1.0 -> (none)' in out
+    # unwanted is in the indexes, not the pool: no host can install it.
+    assert 'unwanted' not in out
+    assert cli.main([*args, '--unmirrored']) == 0
+    assert 'unwanted 1.0 -> (none)' in capsys.readouterr().out
 
     args = ['-c', config, 'diff', '20260922a..20260922a', '--suite=noble']
     assert cli.main(args) == 0
@@ -374,11 +377,20 @@ def test_diff_group_files(tmp_path, monkeypatch, capsys):
     lines = capsys.readouterr().out.splitlines()
     fixed = b'app 1.0.3 amd64'
     extra = b'extra 1.0 amd64'
-    assert lines == [
-        '# codename suites component size sha256 path',
+    fixed_line = (
         f'noble noble-security,noble-updates main {len(fixed)} '
         f'{hashlib.sha256(fixed).hexdigest()} '
-        'ubuntu/ch/cur/pool/main/a/app/app_1.0.3_amd64.deb',
+        'ubuntu/ch/cur/pool/main/a/app/app_1.0.3_amd64.deb'
+    )
+    # extra is named by noble's index only: the filter takes app.
+    assert lines == [
+        '# codename suites component size sha256 path',
+        fixed_line,
+    ]
+    assert cli.main([*args, 'ubuntu', '--files', '--unmirrored']) == 0
+    assert capsys.readouterr().out.splitlines() == [
+        '# codename suites component size sha256 path',
+        fixed_line,
         f'noble noble main {len(extra)} {hashlib.sha256(extra).hexdigest()} '
         'ubuntu/ch/cur/pool/main/e/extra/extra_1.0_amd64.deb',
     ]
@@ -402,7 +414,10 @@ def test_diff_json(tmp_path, monkeypatch, capsys):
     assert got['a'] == '20260922a' and got['b'] == '20260922b'
     head = got['heads']['main/binary-amd64']
     assert head['changed']['app'] == ['1.0', '2.0']
-    assert 'unwanted' in head['removed']
+    assert 'unwanted' not in head['removed']
+    assert cli.main([*args, '--json', '--unmirrored']) == 0
+    (got,) = json.loads(capsys.readouterr().out)
+    assert 'unwanted' in got['heads']['main/binary-amd64']['removed']
 
 
 def _fail_store(cfg):
