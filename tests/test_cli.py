@@ -765,3 +765,17 @@ def test_naming_an_upstream_skips_other_families(tmp_path, monkeypatch):
     assert names(['debian']) == {'debian', 'kubernetes'}
     # but it depends on nothing itself
     assert names(['kubernetes']) == {'kubernetes'}
+
+    # and no other upstream's Release is fetched to find that out: a
+    # sync of it works while their servers are down
+    probed = []
+    probe = sync.probe_family
+    monkeypatch.setattr(
+        sync,
+        'probe_family',
+        lambda http, up, *a: probed.append(up.name) or probe(http, up, *a),
+    )
+    assert names(['kubernetes']) == {'kubernetes'}
+    assert probed == []
+    assert names(['debian']) == {'debian', 'kubernetes'}
+    assert set(probed) == {'ubuntu', 'debian', 'kubernetes'}

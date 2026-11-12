@@ -148,7 +148,20 @@ class Sync:
         self.selection = pool.select(suites)
 
     def _that_matter(self, jobs: list[tuple], http) -> list[tuple]:
-        "The (upstream, source, suite) jobs the named upstreams need"
+        """The (upstream, source, suite) jobs the named upstreams need
+
+        Only a filtered upstream needs others: without one named, no
+        Release is probed, so a sync of an unfiltered upstream does not
+        depend on any other upstream's server being up.
+        """
+        named = [job for job in jobs if self.scope.names(job[0])]
+        if all(job[0].filter is None for job in named):
+            if len(named) < len(jobs):
+                log.info(
+                    'skipping %d suites that cannot matter',
+                    len(jobs) - len(named),
+                )
+            return named
         log.info(
             'checking the Release of %d suites to see which matter', len(jobs)
         )
